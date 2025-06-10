@@ -35,7 +35,20 @@ from experiments.robot.robot_utils import (
     set_seed_everywhere,
 )
 
+import torch
+import numpy
+import numpy.core.multiarray
+import pickle
 
+# POTENTIALLY DANGEROUS: Only do this if you trust the source of the checkpoint files.
+# This allows specific numpy functions/classes that are needed to load the LIBERO initial states.
+torch.serialization.add_safe_globals([
+    numpy.core.multiarray._reconstruct,
+    numpy.ndarray,
+    numpy.dtype,
+    numpy.dtypes.Float64DType,
+    pickle.UnpicklingError
+])
 
 @dataclass
 class GenerateConfig:
@@ -51,14 +64,14 @@ class GenerateConfig:
     
     action_decoder_path:str = "./vla-scripts/libero_log/finetune-libero/action_decoder.pt"
     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
-    save_video: bool = False                         # Whether to save rollout videos
+    save_video: bool = True                         # Whether to save rollout videos
 
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
     task_suite_name: str = "libero_10"               # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 50                    # Number of rollouts per task
+    num_trials_per_task: int = 1                     # Number of rollouts per task
     window_size: int = 12
 
     #################################################################################################################
