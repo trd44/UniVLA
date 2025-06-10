@@ -152,3 +152,9 @@ dmypy.json
 # Caches and Datasets
 cache/
 data/
+
+# Models
+univla-7b-224-sft-libero
+
+# Rollout files
+experiments/robot/libero/rollouts/*
