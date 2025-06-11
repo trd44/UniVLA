@@ -5,7 +5,7 @@ python run_libero_eval_custom.py \
     --action_decoder_path ../../../univla-7b-224-sft-libero/univla-libero-10/action_decoder.pt \
     --pretrained_checkpoint ../../../univla-7b-224-sft-libero/univla-libero-10 \
     --save_video True \
-    --command "Put the cream cheese box, butter, alphabet soup, and the tomato sauce in the basket." \
+    --commands "Pick up the milk and put it in the basket" "Pick up the soup and put it in the basket" \
     --num_trials_per_task 10 \
     --run_id_note "my_first_libero_10_test"
 """
@@ -77,7 +77,8 @@ class GenerateConfig:
     ###############################################################################
     # Custom command
     ###############################################################################
-    command: Optional[str] = None                    # Natural language command to execute
+    command: Optional[str] = None                    # Natural language command to execute (single)
+    commands: List[str] = field(default_factory=list)  # Multiple natural language commands to execute sequentially
 
     ###############################################################################
     # Utils
@@ -140,23 +141,26 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
 
     # Initialize LIBERO environment and task description
     env, default_description = get_libero_env(task, cfg.model_family, resolution=256)
-    task_description = cfg.command if cfg.command is not None else default_description
+    task_descriptions: List[str] = []
+    if cfg.commands:
+        task_descriptions.extend(cfg.commands)
+    elif cfg.command is not None:
+        task_descriptions.append(cfg.command)
+    else:
+        task_descriptions.append(default_description)
 
     resize_size = get_image_resize_size(cfg)
     latent_action_detokenize = [f"<ACT_{i}>" for i in range(32)]
 
     total_episodes, total_successes = 0, 0
     for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
-        print(f"\nTask: {task_description}")
-        log_file.write(f"\nTask: {task_description}\n")
+        print(f"\nCommands: {task_descriptions}")
+        log_file.write(f"\nCommands: {task_descriptions}\n")
 
         env.reset()
         action_decoder.reset()
-        hist_action = ""
-        prev_hist_action = [""]
         obs = env.set_init_state(initial_states[episode_idx])
 
-        t = 0
         replay_images = []
         if cfg.task_suite_name == "libero_spatial":
             max_steps = 240
@@ -171,79 +175,93 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         else:
             max_steps = 300
 
-        print(f"Starting episode {total_episodes+1}...")
-        log_file.write(f"Starting episode {total_episodes+1}...\n")
-        while t < max_steps + cfg.num_steps_wait:
-            try:
-                if t < cfg.num_steps_wait:
-                    obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+        for cmd_idx, task_description in enumerate(task_descriptions):
+            print(f"Starting episode {total_episodes+1} command {cmd_idx+1}: {task_description}")
+            log_file.write(f"Starting episode {total_episodes+1} command {cmd_idx+1}: {task_description}\n")
+
+            action_decoder.reset()
+            hist_action = ""
+            prev_hist_action = [""]
+            t = 0
+            done = False
+
+            while t < max_steps + cfg.num_steps_wait:
+                try:
+                    if t < cfg.num_steps_wait:
+                        obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                        t += 1
+                        continue
+
+                    # Get preprocessed image
+                    img = get_libero_image(obs, resize_size)
+                    replay_images.append(img)
+    
+                    observation = {
+                        "full_image": img,
+                        "state": np.concatenate(
+                            (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
+                        ),
+                    }
+    
+                    start_idx = len(prev_hist_action) if len(prev_hist_action) < 4 else 4
+                    prompt_hist_action_list = [prev_hist_action[idx] for idx in range(-1 * start_idx, 0)]
+                    prompt_hist_action = ""
+                    for latent_action in prompt_hist_action_list:
+                        prompt_hist_action += latent_action
+    
+                    latent_action, visual_embed, generated_ids = get_latent_action(
+                        cfg,
+                        model,
+                        observation,
+                        task_description,
+                        processor=processor,
+                        hist_action=prev_hist_action[-1],
+                    )
+    
+                    hist_action = ""
+                    for latent_action_ids in generated_ids[0]:
+                        hist_action += latent_action_detokenize[latent_action_ids.item() - 32001]
+                    prev_hist_action.append(hist_action)
+    
+                    action_norm_stats = model.get_action_stats(cfg.unnorm_key)
+                    mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
+                    action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
+    
+                    action = action_decoder(latent_action, visual_embed, mask, action_low, action_high)
+                    action = normalize_gripper_action(action, binarize=True)
+                    if cfg.model_family == "openvla":
+                        action = invert_gripper_action(action)
+    
+                    obs, reward, done, info = env.step(action.tolist())
+                    if done:
+                        total_successes += 1
+                        break
                     t += 1
-                    continue
+                except Exception as e:
+                    print(f"Caught exception: {e}")
+                    log_file.write(f"Caught exception: {e}\n")
+                    break
 
-                # Get preprocessed image
-                img = get_libero_image(obs, resize_size)
-                replay_images.append(img)
+            total_episodes += 1
 
-                observation = {
-                    "full_image": img,
-                    "state": np.concatenate(
-                        (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
-                    ),
-                }
-
-                start_idx = len(prev_hist_action) if len(prev_hist_action) < 4 else 4
-                prompt_hist_action_list = [prev_hist_action[idx] for idx in range(-1 * start_idx, 0)]
-                prompt_hist_action = ""
-                for latent_action in prompt_hist_action_list:
-                    prompt_hist_action += latent_action
-
-                latent_action, visual_embed, generated_ids = get_latent_action(
-                    cfg,
-                    model,
-                    observation,
-                    task_description,
-                    processor=processor,
-                    hist_action=prev_hist_action[-1],
+            if cfg.save_video:
+                save_rollout_video(
+                    replay_images,
+                    total_episodes,
+                    success=done,
+                    task_description=task_description,
+                    log_file=log_file,
                 )
 
-                hist_action = ""
-                for latent_action_ids in generated_ids[0]:
-                    hist_action += latent_action_detokenize[latent_action_ids.item() - 32001]
-                prev_hist_action.append(hist_action)
+            print(f"Success: {done}")
+            print(f"# episodes completed so far: {total_episodes}")
+            print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+            log_file.write(f"Success: {done}\n")
+            log_file.write(f"# episodes completed so far: {total_episodes}\n")
+            log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
+            log_file.flush()
 
-                action_norm_stats = model.get_action_stats(cfg.unnorm_key)
-                mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
-                action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
-
-                action = action_decoder(latent_action, visual_embed, mask, action_low, action_high)
-                action = normalize_gripper_action(action, binarize=True)
-                if cfg.model_family == "openvla":
-                    action = invert_gripper_action(action)
-
-                obs, reward, done, info = env.step(action.tolist())
-                if done:
-                    total_successes += 1
-                    break
-                t += 1
-            except Exception as e:
-                print(f"Caught exception: {e}")
-                log_file.write(f"Caught exception: {e}\n")
-                break
-
-        total_episodes += 1
-
-        if cfg.save_video:
-            save_rollout_video(
-                replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
-            )
-
-        print(f"Success: {done}")
-        print(f"# episodes completed so far: {total_episodes}")
-        print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
-        log_file.write(f"Success: {done}\n")
-        log_file.write(f"# episodes completed so far: {total_episodes}\n")
-        log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
-        log_file.flush()
+            replay_images = []
 
     log_file.close()
     if cfg.use_wandb:
