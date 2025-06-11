@@ -1,3 +1,14 @@
+"""
+Example usage:
+python run_libero_eval.py \
+    --task_suite_name libero_10 \
+    --action_decoder_path ../../../univla-7b-224-sft-libero/univla-libero-10/action_decoder.pt \
+    --pretrained_checkpoint ../../../univla-7b-224-sft-libero/univla-libero-10 \
+    --save_video True \
+    --num_trials_per_task 1 \
+    --run_id_note "my_first_libero_10_test"
+"""
+
 import os
 import sys
 from dataclasses import dataclass
