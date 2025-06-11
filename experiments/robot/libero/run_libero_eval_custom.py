@@ -1,9 +1,21 @@
+"""
+Example usage:
+python run_libero_eval_custom.py \
+    --task_suite_name libero_10 \
+    --action_decoder_path ../../../univla-7b-224-sft-libero/univla-libero-10/action_decoder.pt \
+    --pretrained_checkpoint ../../../univla-7b-224-sft-libero/univla-libero-10 \
+    --save_video True \
+    --command "Put the cream cheese box, butter, alphabet soup, and the tomato sauce in the basket." \
+    --num_trials_per_task 10 \
+    --run_id_note "my_first_libero_10_test"
+"""
+
 import os
 import sys
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import draccus
 import numpy as np
@@ -153,7 +165,7 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         elif cfg.task_suite_name == "libero_goal":
             max_steps = 320
         elif cfg.task_suite_name == "libero_10":
-            max_steps = 550
+            max_steps = 1000
         elif cfg.task_suite_name == "libero_90":
             max_steps = 420
         else:
