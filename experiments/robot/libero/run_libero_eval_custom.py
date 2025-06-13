@@ -5,10 +5,9 @@ python run_libero_eval_custom.py \
     --action_decoder_path ../../../univla-7b-224-sft-libero/univla-libero-10/action_decoder.pt \
     --pretrained_checkpoint ../../../univla-7b-224-sft-libero/univla-libero-10 \
     --save_video True \
-    --command1 "Put both the cream cheese box and the butter in the basket." \
-    --command2 "Put both the alphabet soup and the tomato sauce in the basket." \
+    --commands "Put the butter in the basket; Put the alphabet soup in the basket" \
     --num_trials_per_task 5 \
-    --run_id_note "my_first_libero_10_test"
+    --run_id_note ""
 """
 
 import os
@@ -71,7 +70,7 @@ class GenerateConfig:
     # Task suite. Options: libero_spatial, libero_object, libero_goal,
     # libero_10, libero_90
     task_suite_name: str = "libero_10"
-    task_id: int = 0                                 # Index of the task within the suite
+    task_id: int = 1                                 # Index of the task within the suite
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 1                     # Number of rollouts per task
     window_size: int = 12
@@ -79,8 +78,7 @@ class GenerateConfig:
     ###############################################################################
     # Custom command
     ###############################################################################
-    command1: Optional[str] = None                   # Natural language command to execute
-    command2: Optional[str] = None                   # Natural language command to execute
+    commands: Optional[str] = None
 
     ###############################################################################
     # Utils
@@ -144,12 +142,15 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
     # Initialize LIBERO environment and task description
     env, default_description = get_libero_env(task, cfg.model_family, resolution=256)
     # task_description = cfg.command if cfg.command is not None else default_description
+    print(f"Default task description: {default_description}")
     # cmds = cfg.commands if cfg.commands else [default_description]
-    if cfg.command1 and cfg.command2:
-        cmds = [cfg.command1, cfg.command2]
-    elif cfg.command1:
-        cmds = [cfg.command1]
+
+    if cfg.commands:
+        # Split the string by your chosen delimiter (e.g., ';')
+        # .strip() removes any leading/trailing whitespace from each command
+        cmds = [cmd.strip() for cmd in cfg.commands.split(';')]
     else:
+        # If --commands was not provided, use the default
         cmds = [default_description]
 
     resize_size = get_image_resize_size(cfg)
