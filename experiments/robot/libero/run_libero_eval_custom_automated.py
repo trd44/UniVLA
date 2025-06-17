@@ -248,6 +248,7 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
                     cmds.append((obj, cmd_str))
             
             print(f"cmds {cmds}")
+            log_file.write(f"Commands order {cmds}\n")
 
             print(f"Task {tid} | Episode {episode_idx+1}/{cfg.num_trials_per_task}")
             log_file.write(f"Task {tid} | Episode {episode_idx+1}/{cfg.num_trials_per_task}\n")
