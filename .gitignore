@@ -158,3 +158,4 @@ univla-7b-224-sft-libero
 
 # Rollout files
 experiments/robot/libero/rollouts/*
+rollouts/

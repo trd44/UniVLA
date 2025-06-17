@@ -1,24 +1,19 @@
 """
 Example usage (from project root):
-python experiments/robot/libero/run_libero_eval_custom.py \
+python experiments/robot/libero/run_libero_eval_custom_automated.py \
     --task_suite_name libero_object \
     --save_video True \
-    --commands "pick up the bbq sauce and place it in the basket; pick up the alphabet soup and place it in the basket" \
+    --num_commands 2 \
     --num_trials_per_task 1
-
-Old args
-    --action_decoder_path ../../../univla-7b-224-sft-libero/univla-libero-10/action_decoder.pt \
-    --pretrained_checkpoint ../../../univla-7b-224-sft-libero/univla-libero-10 \
-    --run_id_note ""
 """
 
 import os
 import sys
-import argparse
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union, List
+from typing import Optional, Union
+import random
+import re
 
 import draccus
 import numpy as np
@@ -84,6 +79,8 @@ class GenerateConfig:
     # Custom command
     ###############################################################################
     commands: Optional[str] = None
+    num_commands: int = 1  # number of random objects to pick for commands
+    basket_thresh: float = 0.08  # distance threshold to consider object in basket
 
     ###############################################################################
     # Utils
@@ -153,16 +150,21 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
     print(f"Default task description: {default_description}")
     # cmds = cfg.commands if cfg.commands else [default_description]
 
-    if cfg.commands:
-        # Split the string by your chosen delimiter (e.g., ';')
-        # .strip() removes any leading/trailing whitespace from each command
-        cmds = [cmd.strip() for cmd in cfg.commands.split(';')]
-    else:
-        # If --commands was not provided, use the default
-        cmds = [default_description]
-
     resize_size = get_image_resize_size(cfg)
     latent_action_detokenize = [f"<ACT_{i}>" for i in range(32)]
+
+    if cfg.task_suite_name == "libero_spatial":
+        max_steps = 240
+    elif cfg.task_suite_name == "libero_object":
+        max_steps = 300
+    elif cfg.task_suite_name == "libero_goal":
+        max_steps = 320
+    elif cfg.task_suite_name == "libero_10":
+        max_steps = 550
+    elif cfg.task_suite_name == "libero_90":
+        max_steps = 420
+    else:
+        max_steps = 300
 
     total_episodes, total_successes = 0, 0
     for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
@@ -171,36 +173,49 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         # set initial state once per episode
         obs = env.set_init_state(initial_states[episode_idx])
 
+        # cache basket position for distance-based containment checks
+        basket_pos = obs["basket_1_pos"].copy()
+
         home_ee_pos = obs["robot0_eef_pos"].copy()
         home_ee_quat = obs["robot0_eef_quat"].copy()
         # convert home orientation quaternion to axis-angle
         home_ee_aa = quat2axisangle(home_ee_quat)
 
         episode_replay_images = []
-        if cfg.task_suite_name == "libero_spatial":
-            max_steps = 240
-        elif cfg.task_suite_name == "libero_object":
-            max_steps = 300
-        elif cfg.task_suite_name == "libero_goal":
-            max_steps = 320
-        elif cfg.task_suite_name == "libero_10":
-            max_steps = 550
-        elif cfg.task_suite_name == "libero_90":
-            max_steps = 420
+
+        if cfg.commands:
+            # split on semicolons for explicit commands, wrap as (None, cmd)
+            cmds = [(None, cmd.strip()) for cmd in cfg.commands.split(';')]
         else:
-            max_steps = 300
+            # collect all object names except the basket from the environment
+            obj_ids = env.env.obj_body_id  # dict mapping object names to body IDs
+            # filter out any key that starts with 'basket'
+            candidates = [name for name in obj_ids.keys() if not name.startswith("basket")]
+            # sample n unique objects
+            selected = random.sample(candidates, cfg.num_commands)
+            # build English commands
+            cmds = []
+            for obj in selected:
+                # remove trailing number and convert underscores to spaces
+                clean_name = re.sub(r'_\d+$', '', obj).replace('_', ' ')
+                cmd_str = f"pick up the {clean_name} and put it in the basket"
+                cmds.append((obj, cmd_str))
+        
+        print(f"cmds {cmds}")
 
         print(f"Starting episode {total_episodes+1}...")
         log_file.write(f"Starting episode {total_episodes+1}...\n")
 
-        for task_description in cmds:
+        # Per-command loop with new logic
+        for obj_name, task_description in cmds:
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
 
+            cmd_success = False
             t = 0
-            hist_action = ""
             prev_hist_action = [""]
 
+            # run until success (object in basket) or time runs out
             while t < max_steps + cfg.num_steps_wait:
                 try:
                     if t < cfg.num_steps_wait:
@@ -208,7 +223,7 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
                         t += 1
                         continue
 
-                    # Get preprocessed image
+                    # Get image & state, build prompt...
                     img = get_libero_image(obs, resize_size)
                     episode_replay_images.append(img)
 
@@ -249,35 +264,52 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
                         action = invert_gripper_action(action)
 
                     obs, reward, done, info = env.step(action.tolist())
-                    if done:
-                        total_successes += 1
-                        break
+
+                    # check if object is in basket (for random commands)
+                    if obj_name is not None:
+                        obj_pos = obs[f"{obj_name}_pos"]
+                        # distance check in XY plane (or full 3D)
+                        if np.linalg.norm(obj_pos - basket_pos) < cfg.basket_thresh:
+                            cmd_success = True
+                            total_successes += 1
+                            break
+
                     t += 1
                 except Exception as e:
                     print(f"Caught exception: {e}")
                     log_file.write(f"Caught exception: {e}\n")
                     break
 
-            # Return to home position for spatial and object tasks
+            # after loop: check command outcome
+            if not cmd_success:
+                print(f"Task FAILED to complete in {max_steps} steps.")
+                log_file.write(f"Task FAILED: {task_description}\n")
+                break  # stop processing further commands / end episode
+
+            # on success, optionally return home
             if cfg.task_suite_name in ("libero_spatial", "libero_object"):
-                # clear termination flag to allow further steps
                 env._terminated = False
                 return_to_home(env, home_ee_pos, home_ee_quat, episode_replay_images, resize_size)
 
-            total_episodes += 1
+            # record that this command succeeded
+            print(f"Task SUCCEEDED: {task_description}")
+            log_file.write(f"Task SUCCEEDED: {task_description}\n")
 
-            if cfg.save_video:
-                save_rollout_video(
-                    episode_replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
-                )
-
-            print(f"Success: {done}")
-            print(f"# episodes completed so far: {total_episodes}")
-            print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
-            log_file.write(f"Success: {done}\n")
-            log_file.write(f"# episodes completed so far: {total_episodes}\n")
-            log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
-            log_file.flush()
+        # End of per-command loop: record episode, save video, print summary once per episode
+        total_episodes += 1
+        if cfg.save_video:
+            # Success is True if all commands succeeded (i.e., didn't break out early)
+            episode_success = (cmd_success if 'cmd_success' in locals() else False)
+            save_rollout_video(
+                episode_replay_images, total_episodes, success=episode_success, task_description=task_description, log_file=log_file
+            )
+        print(f"Success: {episode_success}")
+        print(f"# episodes completed so far: {total_episodes}")
+        print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+        log_file.write(f"Success: {episode_success}\n")
+        log_file.write(f"# episodes completed so far: {total_episodes}\n")
+        log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
+        log_file.flush()
 
     log_file.close()
     if cfg.use_wandb:
@@ -332,10 +364,10 @@ def return_to_home(env, home_pos, home_quat, episode_replay_images, resize_size,
         step_aa = np.zeros(3)
         # always open gripper
         gripper = -1.0
-        if i%10==0:
-            print(f"Home position {home_pos}")
-            print(f"current pos {ee_pos}")
-            print(f"step position {step_pos}")
+        # if i%10==0:
+        #     print(f"Home position {home_pos}")
+        #     print(f"current pos {ee_pos}")
+        #     print(f"step position {step_pos}")
         action = np.concatenate([step_pos, step_aa, [gripper]])
         obs, _, _, _ = env.step(action.tolist())
         # capture frame
