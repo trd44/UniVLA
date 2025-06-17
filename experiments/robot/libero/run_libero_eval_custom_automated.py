@@ -5,9 +5,9 @@ python experiments/robot/libero/run_libero_eval_custom_automated.py \
     --task_suite_name libero_object \
     --save_video True \
     --use_wandb True \
-    --all_tasks True \
+    --task_id 0 \
     --num_commands 6 \
-    --num_trials_per_task 1
+    --num_trials_per_task 100
 
 python experiments/robot/libero/run_libero_eval_custom_automated.py \
     --task_suite_name libero_object \
@@ -39,6 +39,46 @@ from experiments.robot.libero.libero_utils import (
     save_rollout_video,
 )
 from libero.libero import benchmark
+
+# Helper functions extracted for clarity and reuse
+def init_wandb_if_needed(cfg, run_id):
+    """Initialize wandb only if enabled, return the run or None."""
+    if not cfg.use_wandb:
+        return None
+    import wandb
+    init_kwargs = {"project": cfg.wandb_project, "name": run_id}
+    if cfg.wandb_entity and cfg.wandb_entity != "YOUR_WANDB_ENTITY":
+        init_kwargs["entity"] = cfg.wandb_entity
+    settings = wandb.Settings(_stats_sampling_interval=0.5)
+    return wandb.init(**init_kwargs, settings=settings)
+
+def get_task_ids(cfg):
+    """Return list of task IDs to run based on all_tasks flag."""
+    suite_sizes = {
+        "libero_spatial": 10,
+        "libero_object": 10,
+        "libero_goal": 10,
+        "libero_10": 10,
+        "libero_90": 90,
+    }
+    if cfg.all_tasks:
+        return list(range(suite_sizes[cfg.task_suite_name]))
+    else:
+        return [cfg.task_id]
+
+def generate_commands(env, cfg):
+    """Generate list of (obj_name, command_str) tuples."""
+    if cfg.commands:
+        return [(None, cmd.strip()) for cmd in cfg.commands.split(';')]
+    obj_ids = env.env.obj_body_id
+    candidates = [name for name in obj_ids if not name.startswith("basket")]
+    num_to_pick = len(candidates) if cfg.all_items else cfg.num_commands
+    selected = random.sample(candidates, num_to_pick)
+    cmds = []
+    for obj in selected:
+        clean = re.sub(r'_\d+$', '', obj).replace('_', ' ')
+        cmds.append((obj, f"pick up the {clean} and place it in the basket"))
+    return cmds
 
 # Reuse ActionDecoder from the default evaluation script
 from experiments.robot.libero.run_libero_eval import ActionDecoder
@@ -145,37 +185,13 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
     log_file = open(local_log_filepath, "w")
     print(f"Logging to local log file: {local_log_filepath}")
 
-    if cfg.use_wandb:
-        import wandb
-        # Set your wandb_entity to your actual W&B username or organization, not the placeholder
-        init_kwargs = {"project": cfg.wandb_project, 
-                       "name": run_id, 
-        }
-
-        # only include entity if it's not the placeholder
-        if cfg.wandb_entity and cfg.wandb_entity != "YOUR_WANDB_ENTITY":
-            init_kwargs["entity"] = cfg.wandb_entity
-
-        # configure system metrics sampling interval (seconds)
-        settings = wandb.Settings(_stats_sampling_interval=0.5)
-
-        wandb.init(**init_kwargs, settings=settings)
+    # Initialize Weights & Biases if requested
+    wb_run = init_wandb_if_needed(cfg, run_id)
 
 
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
-    # determine which task IDs to run
-    suite_sizes = {
-        "libero_spatial": 10,
-        "libero_object": 10,
-        "libero_goal": 10,
-        "libero_10": 10,
-        "libero_90": 90,
-    }
-    if cfg.all_tasks:
-        task_ids = list(range(suite_sizes[cfg.task_suite_name]))
-    else:
-        task_ids = [cfg.task_id]
+    task_ids = get_task_ids(cfg)
 
     resize_size = get_image_resize_size(cfg)
     latent_action_detokenize = [f"<ACT_{i}>" for i in range(32)]
@@ -211,11 +227,14 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         per_task_full_successes = 0  # count of episodes where all subtasks succeeded
         per_task_subtask_successes = [0] * cfg.num_commands
 
+        # wrap episode index around available initial states
+        num_states = len(initial_states)
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
             env.reset()
             action_decoder.reset()
             # set initial state once per episode
-            obs = env.set_init_state(initial_states[episode_idx])
+            state_idx = episode_idx % num_states
+            obs = env.set_init_state(initial_states[state_idx])
 
             # cache basket position for distance-based containment checks
             basket_pos = obs["basket_1_pos"].copy()
@@ -227,26 +246,8 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
 
             episode_replay_images = []
 
-            if cfg.commands:
-                # split on semicolons for explicit commands, wrap as (None, cmd)
-                cmds = [(None, cmd.strip()) for cmd in cfg.commands.split(';')]
-            else:
-                # collect all object names except the basket from the environment
-                obj_ids = env.env.obj_body_id  # dict mapping object names to body IDs
-                # filter out any key that starts with 'basket'
-                candidates = [name for name in obj_ids.keys() if not name.startswith("basket")]
-                # determine how many to pick: either all items or cfg.num_commands
-                num_to_pick = len(candidates) if cfg.all_items else cfg.num_commands
-                # sample num_to_pick unique objects
-                selected = random.sample(candidates, num_to_pick)
-                # build English commands
-                cmds = []
-                for obj in selected:
-                    # remove trailing number and convert underscores to spaces
-                    clean_name = re.sub(r'_\d+$', '', obj).replace('_', ' ')
-                    cmd_str = f"pick up the {clean_name} and put it in the basket"
-                    cmds.append((obj, cmd_str))
-            
+            # Build commands for this episode
+            cmds = generate_commands(env, cfg)
             print(f"cmds {cmds}")
             log_file.write(f"Commands order {cmds}\n")
 
@@ -409,7 +410,6 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
     log_file.close()
     if cfg.use_wandb:
         import wandb
-
         wandb.log(
             {"success_rate/total": float(total_successes) / float(total_episodes), "num_episodes/total": total_episodes}
         )
