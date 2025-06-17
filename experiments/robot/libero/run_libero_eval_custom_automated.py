@@ -81,6 +81,7 @@ class GenerateConfig:
     commands: Optional[str] = None
     num_commands: int = 1  # number of random objects to pick for commands
     basket_thresh: float = 0.08  # distance threshold to consider object in basket
+    all_tasks: bool = False  # whether to run all task IDs in the suite
 
     ###############################################################################
     # Utils
@@ -141,14 +142,18 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
 
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
-    task = task_suite.get_task(cfg.task_id)
-    initial_states = task_suite.get_task_init_states(cfg.task_id)
-
-    # Initialize LIBERO environment and task description
-    env, default_description = get_libero_env(task, cfg.model_family, resolution=256)
-    # task_description = cfg.command if cfg.command is not None else default_description
-    print(f"Default task description: {default_description}")
-    # cmds = cfg.commands if cfg.commands else [default_description]
+    # determine which task IDs to run
+    suite_sizes = {
+        "libero_spatial": 10,
+        "libero_object": 10,
+        "libero_goal": 10,
+        "libero_10": 10,
+        "libero_90": 90,
+    }
+    if cfg.all_tasks:
+        task_ids = list(range(suite_sizes[cfg.task_suite_name]))
+    else:
+        task_ids = [cfg.task_id]
 
     resize_size = get_image_resize_size(cfg)
     latent_action_detokenize = [f"<ACT_{i}>" for i in range(32)]
@@ -167,149 +172,214 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         max_steps = 300
 
     total_episodes, total_successes = 0, 0
-    for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
-        env.reset()
-        action_decoder.reset()
-        # set initial state once per episode
-        obs = env.set_init_state(initial_states[episode_idx])
+    # Overall run summary counters
+    overall_full_successes = 0
+    overall_subtask_successes = [0] * cfg.num_commands
+    for tid in task_ids:
+        print(f"\n===== Starting evaluations for task_id {tid} =====")
+        task = task_suite.get_task(tid)
+        initial_states = task_suite.get_task_init_states(tid)
+        env, default_description = get_libero_env(task, cfg.model_family, resolution=256)
+        print(f"Default task description: {default_description}")
+        log_file.write(f"\n\n=== Task ID: {tid} ===\n")
+        log_file.write(f"Default task description: {default_description}\n")
 
-        # cache basket position for distance-based containment checks
-        basket_pos = obs["basket_1_pos"].copy()
+        # Reset per-task counters for isolated metrics
+        per_task_episodes, per_task_successes = 0, 0
+        per_task_full_successes = 0  # count of episodes where all subtasks succeeded
+        per_task_subtask_successes = [0] * cfg.num_commands
 
-        home_ee_pos = obs["robot0_eef_pos"].copy()
-        home_ee_quat = obs["robot0_eef_quat"].copy()
-        # convert home orientation quaternion to axis-angle
-        home_ee_aa = quat2axisangle(home_ee_quat)
+        for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
+            env.reset()
+            action_decoder.reset()
+            # set initial state once per episode
+            obs = env.set_init_state(initial_states[episode_idx])
 
-        episode_replay_images = []
+            # cache basket position for distance-based containment checks
+            basket_pos = obs["basket_1_pos"].copy()
 
-        if cfg.commands:
-            # split on semicolons for explicit commands, wrap as (None, cmd)
-            cmds = [(None, cmd.strip()) for cmd in cfg.commands.split(';')]
-        else:
-            # collect all object names except the basket from the environment
-            obj_ids = env.env.obj_body_id  # dict mapping object names to body IDs
-            # filter out any key that starts with 'basket'
-            candidates = [name for name in obj_ids.keys() if not name.startswith("basket")]
-            # sample n unique objects
-            selected = random.sample(candidates, cfg.num_commands)
-            # build English commands
-            cmds = []
-            for obj in selected:
-                # remove trailing number and convert underscores to spaces
-                clean_name = re.sub(r'_\d+$', '', obj).replace('_', ' ')
-                cmd_str = f"pick up the {clean_name} and put it in the basket"
-                cmds.append((obj, cmd_str))
-        
-        print(f"cmds {cmds}")
+            home_ee_pos = obs["robot0_eef_pos"].copy()
+            home_ee_quat = obs["robot0_eef_quat"].copy()
+            # convert home orientation quaternion to axis-angle
+            home_ee_aa = quat2axisangle(home_ee_quat)
 
-        print(f"Starting episode {total_episodes+1}...")
-        log_file.write(f"Starting episode {total_episodes+1}...\n")
+            episode_replay_images = []
 
-        # Per-command loop with new logic
-        for obj_name, task_description in cmds:
-            print(f"\nTask: {task_description}")
-            log_file.write(f"\nTask: {task_description}\n")
+            if cfg.commands:
+                # split on semicolons for explicit commands, wrap as (None, cmd)
+                cmds = [(None, cmd.strip()) for cmd in cfg.commands.split(';')]
+            else:
+                # collect all object names except the basket from the environment
+                obj_ids = env.env.obj_body_id  # dict mapping object names to body IDs
+                # filter out any key that starts with 'basket'
+                candidates = [name for name in obj_ids.keys() if not name.startswith("basket")]
+                # sample n unique objects
+                selected = random.sample(candidates, cfg.num_commands)
+                # build English commands
+                cmds = []
+                for obj in selected:
+                    # remove trailing number and convert underscores to spaces
+                    clean_name = re.sub(r'_\d+$', '', obj).replace('_', ' ')
+                    cmd_str = f"pick up the {clean_name} and put it in the basket"
+                    cmds.append((obj, cmd_str))
+            
+            print(f"cmds {cmds}")
 
-            cmd_success = False
-            t = 0
-            prev_hist_action = [""]
+            print(f"Task {tid} | Episode {episode_idx+1}/{cfg.num_trials_per_task}")
+            log_file.write(f"Task {tid} | Episode {episode_idx+1}/{cfg.num_trials_per_task}\n")
 
-            # run until success (object in basket) or time runs out
-            while t < max_steps + cfg.num_steps_wait:
-                try:
-                    if t < cfg.num_steps_wait:
-                        obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+            print(f"Starting episode {total_episodes+1}...")
+
+            episode_full_success = True
+
+            # Per-command loop with new logic
+            for cmd_i, (obj_name, task_description) in enumerate(cmds, start=1):
+                print(f"  Subtask {cmd_i}/{len(cmds)}: {task_description}")
+                log_file.write(f"  Subtask {cmd_i}/{len(cmds)}: {task_description}\n")
+
+                cmd_success = False
+                t = 0
+                prev_hist_action = [""]
+
+                # run until success (object in basket) or time runs out
+                while t < max_steps + cfg.num_steps_wait:
+                    try:
+                        if t < cfg.num_steps_wait:
+                            obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                            t += 1
+                            continue
+
+                        # Get image & state, build prompt...
+                        img = get_libero_image(obs, resize_size)
+                        episode_replay_images.append(img)
+
+                        observation = {
+                            "full_image": img,
+                            "state": np.concatenate(
+                                (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
+                            ),
+                        }
+
+                        start_idx = len(prev_hist_action) if len(prev_hist_action) < 4 else 4
+                        prompt_hist_action_list = [prev_hist_action[idx] for idx in range(-1 * start_idx, 0)]
+                        prompt_hist_action = ""
+                        for latent_action in prompt_hist_action_list:
+                            prompt_hist_action += latent_action
+
+                        latent_action, visual_embed, generated_ids = get_latent_action(
+                            cfg,
+                            model,
+                            observation,
+                            task_description,
+                            processor=processor,
+                            hist_action=prev_hist_action[-1],
+                        )
+
+                        hist_action = ""
+                        for latent_action_ids in generated_ids[0]:
+                            hist_action += latent_action_detokenize[latent_action_ids.item() - 32001]
+                        prev_hist_action.append(hist_action)
+
+                        action_norm_stats = model.get_action_stats(cfg.unnorm_key)
+                        mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
+                        action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
+
+                        action = action_decoder(latent_action, visual_embed, mask, action_low, action_high)
+                        action = normalize_gripper_action(action, binarize=True)
+                        if cfg.model_family == "openvla":
+                            action = invert_gripper_action(action)
+
+                        obs, reward, done, info = env.step(action.tolist())
+
+                        # check if object is in basket (for random commands)
+                        if obj_name is not None:
+                            obj_pos = obs[f"{obj_name}_pos"]
+                            # distance check in XY plane (or full 3D)
+                            if np.linalg.norm(obj_pos - basket_pos) < cfg.basket_thresh:
+                                cmd_success = True
+                                total_successes += 1
+                                per_task_successes += 1
+                                per_task_subtask_successes[cmd_i-1] += 1
+                                break
+
                         t += 1
-                        continue
+                    except Exception as e:
+                        print(f"Caught exception: {e}")
+                        log_file.write(f"Caught exception: {e}\n")
+                        episode_full_success = False
+                        break
 
-                    # Get image & state, build prompt...
-                    img = get_libero_image(obs, resize_size)
-                    episode_replay_images.append(img)
+                # after loop: check command outcome
+                if not cmd_success:
+                    episode_full_success = False
+                    print(f"Task FAILED to complete in {max_steps} steps.")
+                    log_file.write(f"Task FAILED: {task_description}\n")
+                    break  # stop processing further commands / end episode
 
-                    observation = {
-                        "full_image": img,
-                        "state": np.concatenate(
-                            (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
-                        ),
-                    }
+                # on success, optionally return home
+                if cfg.task_suite_name in ("libero_spatial", "libero_object"):
+                    env._terminated = False
+                    return_to_home(env, home_ee_pos, home_ee_quat, episode_replay_images, resize_size)
 
-                    start_idx = len(prev_hist_action) if len(prev_hist_action) < 4 else 4
-                    prompt_hist_action_list = [prev_hist_action[idx] for idx in range(-1 * start_idx, 0)]
-                    prompt_hist_action = ""
-                    for latent_action in prompt_hist_action_list:
-                        prompt_hist_action += latent_action
+                # record that this command succeeded
+                print(f"Task SUCCEEDED: {task_description}")
+                log_file.write(f"Task SUCCEEDED: {task_description}\n")
 
-                    latent_action, visual_embed, generated_ids = get_latent_action(
-                        cfg,
-                        model,
-                        observation,
-                        task_description,
-                        processor=processor,
-                        hist_action=prev_hist_action[-1],
-                    )
+            # End of per-command loop: record episode, save video, print summary once per episode
+            total_episodes += 1
+            per_task_episodes += 1
+            if cfg.save_video:
+                # Success is True if all commands succeeded (i.e., didn't break out early)
+                episode_success = (cmd_success if 'cmd_success' in locals() else False)
+                save_rollout_video(
+                    episode_replay_images, total_episodes, success=episode_success, task_description=task_description, log_file=log_file
+                )
+            if episode_full_success:
+                per_task_full_successes += 1
+            # log full episode result
+            print(f"  Full-episode success: {episode_full_success}")
+            log_file.write(f"  Full-episode success: {episode_full_success}\n")
+            print(f"Success: {episode_success}")
+            print(f"# episodes completed so far: {total_episodes}")
+            print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+            log_file.write(f"Success: {episode_success}\n")
+            log_file.write(f"# episodes completed so far: {total_episodes}\n")
+            log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
+            log_file.flush()
 
-                    hist_action = ""
-                    for latent_action_ids in generated_ids[0]:
-                        hist_action += latent_action_detokenize[latent_action_ids.item() - 32001]
-                    prev_hist_action.append(hist_action)
+        # Print per-task summary
+        print(f"\n=== Summary for task_id {tid}: {per_task_full_successes}/{per_task_episodes} episodes fully successful, "
+              f"{per_task_successes} subtask successes total "
+              f"({per_task_full_successes / per_task_episodes * 100:.1f}% episodes, "
+              f"{per_task_successes / (per_task_episodes*cfg.num_commands) * 100:.1f}% subtasks)")
+        log_file.write(
+            f"\n=== Summary for task_id {tid}: {per_task_full_successes}/{per_task_episodes} episodes fully successful, "
+            f"{per_task_successes} subtask successes total "
+            f"({per_task_full_successes / per_task_episodes * 100:.1f}% episodes, "
+            f"{per_task_successes / (per_task_episodes*cfg.num_commands) * 100:.1f}% subtasks)\n"
+        )
 
-                    action_norm_stats = model.get_action_stats(cfg.unnorm_key)
-                    mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
-                    action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
+        # Subtask breakdown for this task
+        print("Subtask successes:")
+        log_file.write("Subtask successes:\n")
+        for idx, count in enumerate(per_task_subtask_successes, start=1):
+            print(f"  {count} command {idx}s successful")
+            log_file.write(f"  {count} command {idx}s successful\n")
+        # Accumulate into overall counters
+        overall_full_successes += per_task_full_successes
+        for i in range(cfg.num_commands):
+            overall_subtask_successes[i] += per_task_subtask_successes[i]
 
-                    action = action_decoder(latent_action, visual_embed, mask, action_low, action_high)
-                    action = normalize_gripper_action(action, binarize=True)
-                    if cfg.model_family == "openvla":
-                        action = invert_gripper_action(action)
-
-                    obs, reward, done, info = env.step(action.tolist())
-
-                    # check if object is in basket (for random commands)
-                    if obj_name is not None:
-                        obj_pos = obs[f"{obj_name}_pos"]
-                        # distance check in XY plane (or full 3D)
-                        if np.linalg.norm(obj_pos - basket_pos) < cfg.basket_thresh:
-                            cmd_success = True
-                            total_successes += 1
-                            break
-
-                    t += 1
-                except Exception as e:
-                    print(f"Caught exception: {e}")
-                    log_file.write(f"Caught exception: {e}\n")
-                    break
-
-            # after loop: check command outcome
-            if not cmd_success:
-                print(f"Task FAILED to complete in {max_steps} steps.")
-                log_file.write(f"Task FAILED: {task_description}\n")
-                break  # stop processing further commands / end episode
-
-            # on success, optionally return home
-            if cfg.task_suite_name in ("libero_spatial", "libero_object"):
-                env._terminated = False
-                return_to_home(env, home_ee_pos, home_ee_quat, episode_replay_images, resize_size)
-
-            # record that this command succeeded
-            print(f"Task SUCCEEDED: {task_description}")
-            log_file.write(f"Task SUCCEEDED: {task_description}\n")
-
-        # End of per-command loop: record episode, save video, print summary once per episode
-        total_episodes += 1
-        if cfg.save_video:
-            # Success is True if all commands succeeded (i.e., didn't break out early)
-            episode_success = (cmd_success if 'cmd_success' in locals() else False)
-            save_rollout_video(
-                episode_replay_images, total_episodes, success=episode_success, task_description=task_description, log_file=log_file
-            )
-        print(f"Success: {episode_success}")
-        print(f"# episodes completed so far: {total_episodes}")
-        print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
-        log_file.write(f"Success: {episode_success}\n")
-        log_file.write(f"# episodes completed so far: {total_episodes}\n")
-        log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
-        log_file.flush()
+    # Overall run summary
+    print("\n=== Overall Run Summary ===")
+    log_file.write("\n=== Overall Run Summary ===\n")
+    print(f"Full-episode successes across all tasks: {overall_full_successes}")
+    log_file.write(f"Full-episode successes across all tasks: {overall_full_successes}\n")
+    print("Subtask successes across all tasks:")
+    log_file.write("Subtask successes across all tasks:\n")
+    for idx, count in enumerate(overall_subtask_successes, start=1):
+        print(f"  {count} command {idx}s successful")
+        log_file.write(f"  {count} command {idx}s successful\n")
 
     log_file.close()
     if cfg.use_wandb:
