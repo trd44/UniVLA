@@ -1,5 +1,14 @@
 """
 Example usage (from project root):
+
+python experiments/robot/libero/run_libero_eval_custom_automated.py \
+    --task_suite_name libero_object \
+    --save_video True \
+    --use_wandb True \
+    --all_tasks True \
+    --num_commands 6 \
+    --num_trials_per_task 1
+
 python experiments/robot/libero/run_libero_eval_custom_automated.py \
     --task_suite_name libero_object \
     --save_video True \
@@ -82,6 +91,7 @@ class GenerateConfig:
     num_commands: int = 1  # number of random objects to pick for commands
     basket_thresh: float = 0.08  # distance threshold to consider object in basket
     all_tasks: bool = False  # whether to run all task IDs in the suite
+    all_items: bool = False  # whether to pick all items in the scene
 
     ###############################################################################
     # Utils
@@ -89,7 +99,7 @@ class GenerateConfig:
     run_id_note: Optional[str] = None                # Extra note to add in run ID for logging
     local_log_dir: str = "./experiments/eval_logs"   # Local directory for eval logs
     use_wandb: bool = False                          # Whether to also log results in Weights & Biases
-    wandb_project: str = "YOUR_WANDB_PROJECT"        # Name of W&B project to log to (use default!)
+    wandb_project: str = "UniVLA"                    # Name of W&B project to log to (use default!)
     wandb_entity: str = "YOUR_WANDB_ENTITY"          # Name of entity to log under
 
     seed: int = 7                                    # Random Seed (for reproducibility)
@@ -137,8 +147,20 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
 
     if cfg.use_wandb:
         import wandb
+        # Set your wandb_entity to your actual W&B username or organization, not the placeholder
+        init_kwargs = {"project": cfg.wandb_project, 
+                       "name": run_id, 
+        }
 
-        wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=run_id)
+        # only include entity if it's not the placeholder
+        if cfg.wandb_entity and cfg.wandb_entity != "YOUR_WANDB_ENTITY":
+            init_kwargs["entity"] = cfg.wandb_entity
+
+        # configure system metrics sampling interval (seconds)
+        settings = wandb.Settings(_stats_sampling_interval=0.5)
+
+        wandb.init(**init_kwargs, settings=settings)
+
 
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
@@ -213,8 +235,10 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
                 obj_ids = env.env.obj_body_id  # dict mapping object names to body IDs
                 # filter out any key that starts with 'basket'
                 candidates = [name for name in obj_ids.keys() if not name.startswith("basket")]
-                # sample n unique objects
-                selected = random.sample(candidates, cfg.num_commands)
+                # determine how many to pick: either all items or cfg.num_commands
+                num_to_pick = len(candidates) if cfg.all_items else cfg.num_commands
+                # sample num_to_pick unique objects
+                selected = random.sample(candidates, num_to_pick)
                 # build English commands
                 cmds = []
                 for obj in selected:
