@@ -1,26 +1,18 @@
 """
 Example usage (from project root):
 
-python experiments/robot/libero/run_libero_eval_custom_automated.py \
+python experiments/robot/libero/run_libero_eval_gr00t.py \
     --task_suite_name libero_object \
     --save_video True \
     --use_wandb True \
     --task_id 0 \
     --num_commands 6 \
-    --num_trials_per_task 100
+    --num_trials_per_task 10
 
 python experiments/robot/libero/run_libero_eval_custom_automated.py \
     --task_suite_name libero_object \
     --save_video True \
-    --use_wandb True \
-    --task_id 0 \
-    --num_commands 6 \
-    --permutation True
-
-python experiments/robot/libero/run_libero_eval_custom_automated.py \
-    --task_suite_name libero_object \
-    --save_video True \
-    --commands "pick up the alphabet soup and place it in the basket; pick up the salad dressing and place it in the basket" \
+    --num_commands 2 \
     --num_trials_per_task 1
 """
 
@@ -31,12 +23,16 @@ from pathlib import Path
 from typing import Optional, Union
 import random
 import re
-import itertools
 
 import draccus
 import numpy as np
-import torch
 import tqdm
+import cv2
+
+
+# === GR00T integration imports ===
+from gr00t.model.policy import Gr00tPolicy, EmbodimentTag
+from gr00t.experiment.data_config import DATA_CONFIG_MAP
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
@@ -78,22 +74,7 @@ def get_task_ids(cfg):
 def generate_commands(env, cfg):
     """Generate list of (obj_name, command_str) tuples."""
     if cfg.commands:
-        cmds = []
-        for cmd in cfg.commands.split(';'):
-            cmd = cmd.strip()
-            # extract object label from command text
-            m = re.match(r"pick up the (.+?) and place it in the basket", cmd)
-            label = m.group(1) if m else None
-            obj_name = None
-            if label:
-                # find matching object id by cleaned name
-                for name in env.env.obj_body_id:
-                    clean = re.sub(r'_\d+$', '', name).replace('_', ' ')
-                    if clean == label:
-                        obj_name = name
-                        break
-            cmds.append((obj_name, cmd))
-        return cmds
+        return [(None, cmd.strip()) for cmd in cfg.commands.split(';')]
     obj_ids = env.env.obj_body_id
     candidates = [name for name in obj_ids if not name.startswith("basket")]
     num_to_pick = len(candidates) if cfg.all_items else cfg.num_commands
@@ -105,13 +86,10 @@ def generate_commands(env, cfg):
     return cmds
 
 # Reuse ActionDecoder from the default evaluation script
-from experiments.robot.libero.run_libero_eval import ActionDecoder
-from experiments.robot.openvla_utils import get_processor
 from experiments.robot.robot_utils import (
     DATE_TIME,
     get_image_resize_size,
     get_latent_action,
-    get_model,
     invert_gripper_action,
     normalize_gripper_action,
     set_seed_everywhere,
@@ -152,11 +130,10 @@ class GenerateConfig:
     # Custom command
     ###############################################################################
     commands: Optional[str] = None
-    num_commands: int = 2  # number of random objects to pick for commands
-    basket_thresh: float = 0.05  # distance threshold to consider object in basket
+    num_commands: int = 1  # number of random objects to pick for commands
+    basket_thresh: float = 0.08  # distance threshold to consider object in basket
     all_tasks: bool = False  # whether to run all task IDs in the suite
     all_items: bool = False  # whether to pick all items in the scene
-    permutation: bool = False  # whether to use default + permutations of item commands
 
     ###############################################################################
     # Utils
@@ -184,23 +161,59 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
 
     cfg.unnorm_key = cfg.task_suite_name
 
-    # Load action decoder
-    action_decoder = ActionDecoder(cfg.window_size)
-    action_decoder.net.load_state_dict(torch.load(cfg.action_decoder_path))
-    action_decoder.eval().cuda()
+    # (Removed: ActionDecoder and OpenVLA model loading)
 
-    # Load model
-    model = get_model(cfg)
+    # === Instantiate GR00T policy ===
+    # Attempt to select the PickNPlace data config with robust fallback
+    primary_key = "robot_sim.PickNPlace"
+    selected_key = primary_key
+    if primary_key in DATA_CONFIG_MAP:
+        gr_cfg = DATA_CONFIG_MAP[primary_key]
+        selected_key = primary_key
+    else:
+        # Fallback: use the OXE Droid config if available
+        fallback_key = "oxe_droid"
+        if fallback_key in DATA_CONFIG_MAP:
+            print(f"WARNING: 'robot_sim.PickNPlace' not found. Using '{fallback_key}' instead.")
+            gr_cfg = DATA_CONFIG_MAP[fallback_key]
+            selected_key = fallback_key
+        else:
+            available = ", ".join(DATA_CONFIG_MAP.keys())
+            raise KeyError(
+                f"No DATA_CONFIG_MAP entry for 'robot_sim.PickNPlace' or fallback '{fallback_key}'. "
+                f"Available keys: {available}"
+            )
+    # Map selected_key to the appropriate EmbodimentTag
+    if selected_key in ("single_panda_gripper", "bimanual_panda_gripper", "bimanual_panda_hand",
+                        "fourier_gr1_arms_waist", "fourier_gr1_arms_only", "fourier_gr1_full_upper_body",
+                        "unitree_g1", "unitree_g1_full_body"):
+        emb_tag = EmbodimentTag.GR1
+    elif selected_key == "oxe_droid":
+        emb_tag = EmbodimentTag.OXE_DROID
+    elif selected_key == "agibot_genie1":
+        emb_tag = EmbodimentTag.AGIBOT_GENIE1
+    else:
+        # Default to NEW_EMBODIMENT for unknown configs
+        print(f"WARNING: No specific EmbodimentTag for '{selected_key}', using NEW_EMBODIMENT.")
+        emb_tag = EmbodimentTag.NEW_EMBODIMENT
+    gr_mod_cfg = gr_cfg.modality_config()
+    # Get the original transform pipeline and strip out VideoToTensor, VideoCrop, and VideoResize
+    gr_mod_trans = gr_cfg.transform()
+    try:
+        gr_mod_trans.transforms = [
+            t for t in gr_mod_trans.transforms
+            if t.__class__.__name__ not in ("VideoToTensor", "VideoCrop", "VideoResize")
+        ]
+    except AttributeError:
+        pass
 
-    # Check that the model contains the action un-normalization key
-    if cfg.model_family == "openvla":
-        if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
-            cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
-        assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!"
-
-    processor = None
-    if cfg.model_family == "openvla":
-        processor = get_processor(cfg)
+    gr_policy = Gr00tPolicy(
+        model_path="./GR00T-N1.5-3B",
+        modality_config=gr_mod_cfg,
+        modality_transform=gr_mod_trans,
+        embodiment_tag=emb_tag,
+        device="cuda"
+    )
 
     run_id = f"CUSTOM-EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
     if cfg.run_id_note is not None:
@@ -247,38 +260,6 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         log_file.write(f"\n\n=== Task ID: {tid} ===\n")
         log_file.write(f"Default task description: {default_description}\n")
 
-        # Build permutation sequences if requested
-        permutation_seqs = None
-        if cfg.permutation:
-            # extract default command and object label
-            default_cmd = default_description
-            m = re.match(r"pick up the (.+?) and place it in the basket", default_cmd)
-            default_label = m.group(1) if m else None
-            # gather candidate object names
-            candidates = [name for name in env.env.obj_body_id if not name.startswith("basket")]
-            # find default object by matching label
-            default_obj = None
-            if default_label:
-                for name in candidates:
-                    clean = re.sub(r'_\d+$', '', name).replace('_', ' ')
-                    if clean == default_label:
-                        default_obj = name
-                        break
-            # remaining objects
-            remaining = [o for o in candidates if o != default_obj]
-            # generate permutations of length (cfg.num_commands - 1)
-            permutation_seqs = []
-            for perm in itertools.permutations(remaining, cfg.num_commands - 1):
-                seq = [(default_obj, default_cmd)]
-                for o in perm:
-                    clean = re.sub(r'_\d+$', '', o).replace('_', ' ')
-                    seq.append((o, f"pick up the {clean} and place it in the basket"))
-                permutation_seqs.append(seq)
-            # override trials to cover all permutations
-            cfg.num_trials_per_task = len(permutation_seqs)
-            print(f"Running {cfg.num_trials_per_task} permutation-based episodes")
-            log_file.write(f"Running {cfg.num_trials_per_task} permutation-based episodes\n")
-
         # Reset per-task counters for isolated metrics
         per_task_episodes, per_task_successes = 0, 0
         per_task_full_successes = 0  # count of episodes where all subtasks succeeded
@@ -288,7 +269,6 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         num_states = len(initial_states)
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
             env.reset()
-            action_decoder.reset()
             # set initial state once per episode
             state_idx = episode_idx % num_states
             obs = env.set_init_state(initial_states[state_idx])
@@ -303,12 +283,9 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
 
             episode_replay_images = []
 
-            # select commands: use permutation sequences if enabled, else random/default
-            if cfg.permutation and permutation_seqs is not None:
-                cmds = permutation_seqs[episode_idx]
-            else:
-                cmds = generate_commands(env, cfg)
-            print(f"cmds {cmds}")
+            # Build commands for this episode
+            cmds = generate_commands(env, cfg)
+            # print(f"cmds {cmds}")
             log_file.write(f"Commands order {cmds}\n")
 
             print(f"Task {tid} | Episode {episode_idx+1}/{cfg.num_trials_per_task}")
@@ -337,53 +314,51 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
 
                         # Get image & state, build prompt...
                         img = get_libero_image(obs, resize_size)
+                        # Resize frame to 256×256 for GR00T video transform
+                        img_resized = cv2.resize(img, (256, 256))
+                        # Capture distinct camera views
+                        # Front exterior view
+                        front_raw = env.sim.render(camera_name="frontview", width=resize_size, height=resize_size)
+                        front_rgb = cv2.cvtColor(front_raw, cv2.COLOR_BGR2RGB)
+                        front_resized = cv2.resize(front_rgb, (256, 256))
+                        # Side exterior view
+                        side_raw = env.sim.render(camera_name="sideview", width=resize_size, height=resize_size)
+                        side_rgb = cv2.cvtColor(side_raw, cv2.COLOR_BGR2RGB)
+                        side_resized = cv2.resize(side_rgb, (256, 256))
+                        # Ego (agent) view
+                        ego_raw = env.sim.render(camera_name="agentview", width=resize_size, height=resize_size)
+                        ego_rgb = cv2.cvtColor(ego_raw, cv2.COLOR_BGR2RGB)
+                        ego_resized = cv2.resize(ego_rgb, (256, 256))
+                        # Wrist view (already captured as wrist_resized)
+                        wrist_raw = env.sim.render(camera_name="robot0_eye_in_hand", width=resize_size, height=resize_size)
+                        wrist_rgb = cv2.cvtColor(wrist_raw, cv2.COLOR_BGR2RGB)
+                        wrist_resized = cv2.resize(wrist_rgb, (256, 256))
                         episode_replay_images.append(img)
 
-                        observation = {
-                            "full_image": img,
-                            "state": np.concatenate(
-                                (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
-                            ),
+                        # === GR00T zero-shot inference ===
+                        # Build GR00T-compatible observation (only video keys, no PIL Image)
+                        gr_obs = {
+                            "joint_positions": obs["robot0_eef_pos"].astype(np.float32),
+                            "eef_orientation": quat2axisangle(obs["robot0_eef_quat"].astype(np.float32)),
+                            "gripper": np.array([obs["robot0_gripper_qpos"]], dtype=np.float32),
+                            # Distinct video views for GR00T
+                            "video.exterior_image_1": np.expand_dims(front_resized, axis=0),
+                            "video.exterior_image_2": np.expand_dims(side_resized, axis=0),
+                            "video.ego_view":      np.expand_dims(ego_resized, axis=0),
+                            "video.wrist_image":   np.expand_dims(wrist_resized, axis=0),
                         }
-
-                        start_idx = len(prev_hist_action) if len(prev_hist_action) < 4 else 4
-                        prompt_hist_action_list = [prev_hist_action[idx] for idx in range(-1 * start_idx, 0)]
-                        prompt_hist_action = ""
-                        for latent_action in prompt_hist_action_list:
-                            prompt_hist_action += latent_action
-
-                        latent_action, visual_embed, generated_ids = get_latent_action(
-                            cfg,
-                            model,
-                            observation,
-                            task_description,
-                            processor=processor,
-                            hist_action=prev_hist_action[-1],
-                        )
-
-                        hist_action = ""
-                        for latent_action_ids in generated_ids[0]:
-                            hist_action += latent_action_detokenize[latent_action_ids.item() - 32001]
-                        prev_hist_action.append(hist_action)
-
-                        action_norm_stats = model.get_action_stats(cfg.unnorm_key)
-                        mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
-                        action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
-
-                        action = action_decoder(latent_action, visual_embed, mask, action_low, action_high)
-                        action = normalize_gripper_action(action, binarize=True)
-                        if cfg.model_family == "openvla":
-                            action = invert_gripper_action(action)
+                        # Pass raw numpy arrays (dtype uint8, shape (T, H, W, C)) directly to gr_policy.get_action
+                        # Query GR00T policy (take the first sub-action)
+                        gr_action = gr_policy.get_action(gr_obs)[0]
+                        action = gr_action  # use GR00T's output directly
 
                         obs, reward, done, info = env.step(action.tolist())
 
                         # check if object is in basket (for random commands)
                         if obj_name is not None:
                             obj_pos = obs[f"{obj_name}_pos"]
-                            # distance check in XY plane only
-                            dist_xy = np.linalg.norm(obj_pos[:2] - basket_pos[:2])
-                            # print(f"Distance to basket (XY): {dist_xy:.4f} (threshold {cfg.basket_thresh})")
-                            if dist_xy < cfg.basket_thresh:
+                            # distance check in XY plane (or full 3D)
+                            if np.linalg.norm(obj_pos - basket_pos) < cfg.basket_thresh:
                                 cmd_success = True
                                 total_successes += 1
                                 per_task_successes += 1
