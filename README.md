@@ -27,7 +27,8 @@
   - [Pretraining of Generalist Policy](#two-pretraining-of-generalist-policy)
   - [Post-training for Deployment & Evaluations](#three-post-training-for-deployment--evaluations)
     - [Real-world Experiment](#mechanical_arm-real-world-experiment)
-    - [LIBERO Benchmark](#1-libero)
+    - [LIBERO](#1-libero)
+    - [CALVIN](#2-calvin)
 - [:rocket: UniVLA's Performance](#rocket-univlas-performance)
 - [:pencil: Citation](#pencil-citation)
 
@@ -81,12 +82,12 @@ Real-world robot experiments.
   -  [x] 3) Downstream Fine-tuned Models
       - [x] *LIBERO*
       - [ ] *Room2Room*
-      - [ ] *CALVIN*
+      - [x] *CALVIN*
       - [ ] *SimplerEnv*
 #### 2. 💪 Training and Evlauation Codes on Simulation Benchmarks
   -  [x] **1) LIBERO**
   -  [ ] **2) Room2Room**
-  -  [ ] **3) CALVIN**
+  -  [x] **3) CALVIN**
   -  [ ] **4) SimplerEnv**
 #### 3. :dizzy: Codes and Guidelines for Real-world Deployment
   -  [x] Codes and Docs
@@ -138,6 +139,12 @@ Real-world robot experiments.
     <td><a href="https://huggingface.co/qwbu/univla-7b">univla-7b</a></td>
     <td><a href="https://huggingface.co/qwbu/univla-7b-224-sft-libero">univla-7b-224-sft-libero</a></td>
     <td>Finetuned on the LIBERO dataset</a></td>
+  </tr>
+  <tr>
+    <td>univla-7b-224-sft-calvin</td>
+    <td><a href="https://huggingface.co/qwbu/univla-7b">univla-7b</a></td>
+    <td><a href="https://huggingface.co/qwbu/univla-7b-224-sft-calvin">univla-7b-224-sft-calvin</a></td>
+    <td>Finetuned on the CALVIN dataset</a></td>
   </tr>
 </table>
 
@@ -226,6 +233,16 @@ torchrun --nproc_per_node ${GPUS_PER_NODE} --nnodes ${NNODES} --node_rank ${RANK
                                  --run_root_dir "vla_log" \
 ```
                                  
+Once pretraining is complete, convert the UniVLA weights (default 'Prismatic' format) to HuggingFace AutoClasses with:
+
+```
+python vla-scripts/extern/convert_openvla_weights_to_hf.py \
+    --openvla_model_path_or_id /path/to/your/pretrained_ckpt_path \
+    --ckpt_name /path/to/your/specific_ckpt_name.pt \
+    --output_hf_model_local_path /path/to/your/output_model_path
+```
+
+The converted model is then compatible with HF AutoClasses 'AutoModelForVision2Seq'.
 
 ### :three: Post-training for Deployment & Evaluations
 
@@ -254,7 +271,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 finetune_libero.py \
                                  --run_root_dir "libero_log" \
 ```
 
-Once you finished training and get the action decoder and VLA backbone, you can simply start evaluation with:
+Once you finished training and get the action decoder and UniVLA backbone, you can start evaluation with:
 
 
 ```bash
@@ -272,6 +289,36 @@ python experiments/robot/libero/run_libero_eval.py \
     --seed 7
 ```
 
+#### 2) CALVIN
+
+> Please first follow [CALVIN](https://github.com/mees/calvin) to install relavent dependencies and prepare your dataset
+
+1) You should first set the pretrained UniVLA and latent action model path in ```vla_path``` and ```lam_path``` of the training config.
+2) Set your local CALVIN directory path in ```calvin_root```.
+3) Start training with ```torchrun```:
+
+```bash
+torchrun --standalone --nnodes 1 --nproc-per-node 8 finetune_calvin.py \
+                                 --vla_path /path/to/your/univla-7b \
+                                 --lam_path /path/to/your/lam-stage-2.ckpt \
+                                 --calvin_root /path/to/yout/calvin_root_path \
+                                 --max_steps 100000 \
+                                 --batch_size 8 \
+                                 --grad_accumulation_steps 2 \
+                                 --window_size 12 \ 
+                                 --run_root_dir "calvin_log" 
+```
+
+Start evaluation on CALVIN:
+
+```bash
+# Mutli-GPU evaluation is supported
+torchrun --standalone --nnodes 1 --nproc-per-node 8 experiments/robot/calvin/run_calvin_eval_ddp.py \
+    --calvin_root /path/to/yout/calvin_root_path \
+    --action_decoder_path /path/to/your/action_decoder_path.pt \
+    --pretrained_checkpoint /path/to/your/calvin_finetuned_univla \
+    --seed 7
+```
 > To be updated.
 
 ## :rocket: UniVLA's Performance
