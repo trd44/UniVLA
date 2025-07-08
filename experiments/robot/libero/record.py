@@ -1,0 +1,75 @@
+import os, zipfile, pickle
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+
+class Recording:
+    def __init__(self, env):
+        self.env = env
+        self.target1 = None
+        self.target2 = None
+        self.data_buffer = {}
+        self.trajectory = []
+        self.skill_ids = []
+        self.current_skill_id = None
+
+
+    def _get_relative_object_obs(self):
+        sim = self.env.sim
+
+        # EE pose and orientation
+        self.gripper_body = self.env.sim.model.body_name2id('gripper0_eef')
+        ee_pos = np.asarray(self.env.sim.data.body_xpos[self.gripper_body])
+        ee_quat = np.asarray(self.env.sim.data.body_xquat[self.gripper_body])
+        ee_euler = R.from_quat(ee_quat).as_euler("xyz")
+
+        # Object positions
+        obj1_pos = sim.data.get_body_xpos(self.target1)
+        obj2_pos = sim.data.get_body_xpos(self.target2)
+
+        # Relative positions
+        rel1 = obj1_pos - ee_pos
+        rel2 = obj2_pos - ee_pos
+
+        # Gripper aperture
+        left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_left_inner_finger")])
+        right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_right_inner_finger")])
+        aperture = np.linalg.norm(left_finger_pos - right_finger_pos)
+
+        return np.concatenate([rel1, rel2, [aperture], ee_euler])
+
+    def record_step(self, act):
+        obs = self._get_relative_object_obs()
+        self.trajectory.append(obs)
+        self.trajectory.append(np.array(act))
+
+    def reset(self, skill_id, target1, target2):
+        self.trajectory = []
+        self.current_skill_id = skill_id
+        self.target1 = target1
+        self.target2 = target2
+        if skill_id not in self.skill_ids:
+            self.skill_ids.append(skill_id)
+            self.data_buffer[skill_id] = []
+        # Record the first observation
+        first_obs = self._get_relative_object_obs()
+        self.trajectory.append(first_obs)
+
+    def get_trajectory(self):
+        return self.trajectory
+
+    def save_buffer(self, dir_path):
+        # Ensure the directory exists
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+
+        self.data_buffer[self.current_skill_id].append((self.trajectory, self.target1, self.target2))
+
+        # Decompose the data buffer into action steps
+        for skill_id in self.skill_ids:
+            # Convert the data buffer to bytes
+            data_bytes = pickle.dumps(self.data_buffer[skill_id])
+            file_path = dir_path + skill_id + '.zip'
+            # Write the bytes to a zip file
+            with zipfile.ZipFile(file_path, 'w') as zip_file:
+                with zip_file.open('data.pkl', 'w', force_zip64=True) as file:
+                    file.write(data_bytes)

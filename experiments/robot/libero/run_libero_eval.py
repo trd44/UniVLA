@@ -23,6 +23,7 @@ import numpy as np
 import tqdm
 from libero.libero import benchmark
 from collections import deque
+from libero.record import Recording
 
 import wandb
 
@@ -254,6 +255,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
     latent_action_detokenize = [f'<ACT_{i}>' for i in range(32)]
 
+    # Instantiate trajectory recorder
+    recorder = Recording(env)
+
     # Start evaluation
     total_episodes, total_successes = 0, 0
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
@@ -281,6 +285,14 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
+
+            print(obs.keys())
+            # Reset recorder with episodic info
+            recorder.reset(
+                skill_id=task_description,
+                target1="",#TODO
+                target2="",#TODO
+            )
 
             # Setup
             t = 0
@@ -363,6 +375,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())
+
+                    # Record step in trajectory
+                    recorder.record_step(action)
+
                     if done:
                         task_successes += 1
                         total_successes += 1
@@ -382,6 +398,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 save_rollout_video(
                     replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
                 )
+            # Save trajectory
+            recorder.save_buffer(f"./rollouts/{DATE_TIME}/")
 
             # Log current results
             print(f"Success: {done}")
