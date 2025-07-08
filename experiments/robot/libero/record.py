@@ -7,6 +7,8 @@ class Recording:
         self.env = env
         self.target1 = None
         self.target2 = None
+        self.target1_id = None
+        self.target1_id = None
         self.data_buffer = {}
         self.trajectory = []
         self.skill_ids = []
@@ -23,8 +25,8 @@ class Recording:
         ee_euler = R.from_quat(ee_quat).as_euler("xyz")
 
         # Object positions
-        self.target1 = sim.model.body_name2id(self.target1)
-        self.target2 = sim.model.body_name2id(self.target2)
+        self.target1_id = sim.model.body_name2id(self.target1)
+        self.target2_id = sim.model.body_name2id(self.target2)
         obj1_pos = np.asarray(sim.data.get_body_xpos(self.target1))
         obj2_pos = np.asarray(sim.data.get_body_xpos(self.target2))
 
@@ -33,8 +35,8 @@ class Recording:
         rel2 = obj2_pos - ee_pos
 
         # Gripper aperture
-        left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_left_inner_finger")])
-        right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_right_inner_finger")])
+        left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint1_tip")])
+        right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint2_tip")])
         aperture = np.linalg.norm(left_finger_pos - right_finger_pos)
 
         return np.concatenate([rel1, rel2, [aperture], ee_euler])
