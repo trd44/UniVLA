@@ -17,14 +17,16 @@ class Recording:
         sim = self.env.sim
 
         # EE pose and orientation
-        self.gripper_body = self.env.sim.model.body_name2id('gripper0_eef')
-        ee_pos = np.asarray(self.env.sim.data.body_xpos[self.gripper_body])
-        ee_quat = np.asarray(self.env.sim.data.body_xquat[self.gripper_body])
+        self.gripper_body = sim.model.body_name2id('gripper0_eef')
+        ee_pos = np.asarray(sim.data.body_xpos[self.gripper_body])
+        ee_quat = np.asarray(sim.data.body_xquat[self.gripper_body])
         ee_euler = R.from_quat(ee_quat).as_euler("xyz")
 
         # Object positions
-        obj1_pos = sim.data.get_body_xpos(self.target1)
-        obj2_pos = sim.data.get_body_xpos(self.target2)
+        self.target1 = sim.model.body_name2id(self.target1)
+        self.target2 = sim.model.body_name2id(self.target2)
+        obj1_pos = np.asarray(sim.data.get_body_xpos(self.target1))
+        obj2_pos = np.asarray(sim.data.get_body_xpos(self.target2))
 
         # Relative positions
         rel1 = obj1_pos - ee_pos
