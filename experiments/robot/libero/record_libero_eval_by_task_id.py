@@ -1,11 +1,63 @@
 """
-Example usage (from project root):
+List of libero goal tasks and their descriptions: * marks our tasks of interest
+    Task 0: open the middle drawer of the cabinet
+    *Task 1: put the bowl on the stove
+    Task 2: put the wine bottle on top of the cabinet
+    *Task 3: open the top drawer and put the bowl inside
+    *Task 4: put the bowl on top of the cabinet
+    Task 5: push the plate to the front of the stove
+    *Task 6: put the cream cheese in the bowl
+    *Task 7: turn on the stove
+    *Task 8: put the bowl on the plate
+    Task 9: put the wine bottle on the rack
+
+Example usage (from UniVLA/experiments/robot/libero):
 python record_libero_eval_by_task_id.py \
     --task_suite_name libero_goal \
     --save_video True \
     --task_id 1 \
     --target_1 akita_black_bowl_1_main \
     --target_2 flat_stove_1_burner_plate \
+    --num_trials_per_task 1
+
+python record_libero_eval_by_task_id.py \
+    --task_suite_name libero_goal \
+    --save_video True \
+    --task_id 3 \
+    --target_1 akita_black_bowl_1_main \
+    --target_2 wooden_cabinet_1_cabinet_top \
+    --num_trials_per_task 1
+
+python record_libero_eval_by_task_id.py \
+    --task_suite_name libero_goal \
+    --save_video True \
+    --task_id 4 \
+    --target_1 akita_black_bowl_1_main \
+    --target_2 wooden_cabinet_1_main \
+    --num_trials_per_task 1
+
+python record_libero_eval_by_task_id.py \
+    --task_suite_name libero_goal \
+    --save_video True \
+    --task_id 6 \
+    --target_1 cream_cheese_1 \
+    --target_2 akita_black_bowl_1_main \
+    --num_trials_per_task 1
+
+python record_libero_eval_by_task_id.py \
+    --task_suite_name libero_goal \
+    --save_video True \
+    --task_id 7 \
+    --target_1 stove \
+    --target_2 ??? \
+    --num_trials_per_task 1
+
+python record_libero_eval_by_task_id.py \
+    --task_suite_name libero_goal \
+    --save_video True \
+    --task_id 8 \
+    --target_1 akita_black_bowl_1_main \
+    --target_2 plate_1_main \
     --num_trials_per_task 1
 """
 
@@ -174,7 +226,7 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         action_decoder.reset()
         # set initial state once per episode
         obs = env.set_init_state(initial_states[episode_idx])
-        print(obs.keys())
+        # print(obs.keys())
         print(f"target 1 is {cfg.target_1}")
         print(f"target 2 is {cfg.target_2}")
         
@@ -290,7 +342,9 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
                 )
 
             # Save trajectory
-            recorder.save_buffer(f"./rollouts/{DATE_TIME}/")
+            if done:
+                recorder.save_buffer(f"./rollouts/{DATE_TIME}/", total_successes)
+                print("Saved successful episode")
 
             print(f"Success: {done}")
             print(f"# episodes completed so far: {total_episodes}")
