@@ -61,7 +61,7 @@ class Recording:
     def get_trajectory(self):
         return self.trajectory
 
-    def save_buffer(self, dir_path):
+    def save_buffer(self, dir_path, ep_num):
         # Ensure the directory exists
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
@@ -72,7 +72,7 @@ class Recording:
         for skill_id in self.skill_ids:
             # Convert the data buffer to bytes
             data_bytes = pickle.dumps(self.data_buffer[skill_id])
-            file_path = dir_path + skill_id + '.zip'
+            file_path = dir_path + skill_id + f' episode {ep_num}.zip'
             # Write the bytes to a zip file
             with zipfile.ZipFile(file_path, 'w') as zip_file:
                 with zip_file.open('data.pkl', 'w', force_zip64=True) as file:
