@@ -376,7 +376,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     obs, reward, done, info = env.step(action.tolist())
 
                     # Record step in trajectory
-                    recorder.record_step(action)
+                    if cfg.save_trajectory:
+                        recorder.record_step(action)
 
                     if done:
                         task_successes += 1
@@ -397,8 +398,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 save_rollout_video(
                     replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
                 )
-            # Save trajectory
-            recorder.save_buffer(f"./rollouts/{DATE_TIME}/")
+            if cfg.save_trajectory:
+                # Save trajectory
+                recorder.save_buffer(f"./rollouts/{DATE_TIME}/")
 
             # Log current results
             print(f"Success: {done}")
