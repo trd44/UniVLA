@@ -40,7 +40,7 @@ python record_libero_eval_by_task_id.py \
     --task_suite_name libero_goal \
     --save_video True \
     --task_id 6 \
-    --target_1 cream_cheese_1 \
+    --target_1 cream_cheese_1_main \
     --target_2 akita_black_bowl_1_main \
     --num_trials_per_task 1
 
@@ -48,8 +48,8 @@ python record_libero_eval_by_task_id.py \
     --task_suite_name libero_goal \
     --save_video True \
     --task_id 7 \
-    --target_1 stove \
-    --target_2 ??? \
+    --target_1 flat_stove_1_button \
+    --target_2 flat_stove_1_burner_plate \
     --num_trials_per_task 1
 
 python record_libero_eval_by_task_id.py \
@@ -75,6 +75,9 @@ import torch
 import tqdm
 from record import Recording
 
+# Append to directory so that interpreter can find detection.libero_10_object_detector.py
+sys.path.append("../../../..")
+from detection.libero_goal_object_relation_detector import LiberoGoalObjectRelationDetector
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
@@ -202,12 +205,21 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
 
     # Initialize LIBERO environment and task description
     env, default_description = get_libero_env(task, cfg.model_family, resolution=256)
+    # Initialize the detector if applicable. For now, it's only a libero-goal detector for task 3
+    detector = None
+    if cfg.task_suite_name == 'libero_goal' and cfg.task_id == 3:
+        detector = LiberoGoalObjectRelationDetector(env=env.env)
     # task_description = cfg.command if cfg.command is not None else default_description
     print(f"Default task description: {default_description}")
     # cmds = cfg.commands if cfg.commands else [default_description]
 
     # Instantiate trajectory recorder
     recorder = Recording(env)
+
+    # Specifically for libero-goal task 3, have one additional open-drawer recorder and a place-in-drawer recorder
+    if cfg.task_suite_name == 'libero_goal' and cfg.task_id == 3:
+        open_drawer_recorder = Recording(env)
+        put_bowl_inside_recorder = Recording(env)
 
     if cfg.commands:
         # Split the string by your chosen delimiter (e.g., ';')
@@ -220,7 +232,7 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
     resize_size = get_image_resize_size(cfg)
     latent_action_detokenize = [f"<ACT_{i}>" for i in range(32)]
 
-    total_episodes, total_successes = 0, 0
+    total_episodes, total_successes, total_drawer_opens = 0, 0, 0
     for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
         env.reset()
         action_decoder.reset()
@@ -236,6 +248,17 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
             target1=cfg.target_1,
             target2=cfg.target_2
         )
+        if cfg.task_suite_name == 'libero_goal' and cfg.task_id == 3:
+            open_drawer_recorder.reset(
+                skill_id='open the top drawer',
+                target1=cfg.target_1,
+                target2=cfg.target_2
+            )
+            put_bowl_inside_recorder.reset(
+                skill_id='and put the bowl inside (the top drawer)',
+                target1=cfg.target_1,
+                target2=cfg.target_2
+            )
 
         home_ee_pos = obs["robot0_eef_pos"].copy()
         home_ee_quat = obs["robot0_eef_quat"].copy()
@@ -243,6 +266,7 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
         home_ee_aa = quat2axisangle(home_ee_quat)
 
         episode_replay_images = []
+        episode_after_drawer_open_images = []
         if cfg.task_suite_name == "libero_spatial":
             max_steps = 240
         elif cfg.task_suite_name == "libero_object":
@@ -271,7 +295,10 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
                 try:
                     if t < cfg.num_steps_wait:
                         obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                        if detector is not None:
+                            binary_states = detector.detect_binary_states()
                         t += 1
+                        num_open_drawer = 0 # for libero-goal task 3
                         continue
 
                     # Get preprocessed image
@@ -315,9 +342,25 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
                         action = invert_gripper_action(action)
 
                     obs, reward, done, info = env.step(action.tolist())
-
                     # Record step in trajectory
                     recorder.record_step(action)
+
+                    if detector is not None:
+                        binary_states = detector.detect_binary_states()
+                        num_open_drawer += binary_states['open wooden_cabinet_1_top_region']
+                        if cfg.task_suite_name == 'libero_goal' and cfg.task_id == 3:
+                            if num_open_drawer <= 1:
+                                open_drawer_recorder.record_step(action)
+                            else:
+                                episode_after_drawer_open_images.append(img)
+                                put_bowl_inside_recorder.record_step(action)
+                        if num_open_drawer == 1: # drawer has first become open
+                            total_drawer_opens += 1
+                            if cfg.save_video:
+                                save_rollout_video(
+                                    episode_replay_images, total_episodes, success=True, task_description='open the top drawer', log_file=log_file
+                                )
+                            open_drawer_recorder.save_buffer(f"./rollouts/{DATE_TIME}/", total_drawer_opens)
 
                     if done:
                         total_successes += 1
@@ -340,10 +383,16 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
                 save_rollout_video(
                     episode_replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
                 )
+                if len(episode_after_drawer_open_images) > 0:
+                    save_rollout_video(
+                        episode_after_drawer_open_images, total_episodes, success=done, task_description='and put the bowl inside (the top drawer)', log_file=log_file
+                    )
 
             # Save trajectory
             if done:
                 recorder.save_buffer(f"./rollouts/{DATE_TIME}/", total_successes)
+                if cfg.task_suite_name == 'libero_goal' and cfg.task_id == 3:
+                    put_bowl_inside_recorder.save_buffer(f"./rollouts/{DATE_TIME}/", total_successes)
                 print("Saved successful episode")
 
             print(f"Success: {done}")

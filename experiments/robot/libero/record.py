@@ -45,6 +45,9 @@ class Recording:
         obs = self._get_relative_object_obs()
         self.trajectory.append(obs)
         self.trajectory.append(np.array(act))
+    
+    def record_detection(self, binary_states):
+        self.trajectory.append(np.array(binary_states))
 
     def reset(self, skill_id, target1, target2):
         self.trajectory = []
