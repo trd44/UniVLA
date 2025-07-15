@@ -7,6 +7,8 @@ class Recording:
         self.env = env
         self.target1 = None
         self.target2 = None
+        self.target1_id = None
+        self.target1_id = None
         self.data_buffer = {}
         self.trajectory = []
         self.skill_ids = []
@@ -23,8 +25,8 @@ class Recording:
         ee_euler = R.from_quat(ee_quat).as_euler("xyz")
 
         # Object positions
-        self.target1 = sim.model.body_name2id(self.target1)
-        self.target2 = sim.model.body_name2id(self.target2)
+        self.target1_id = sim.model.body_name2id(self.target1)
+        self.target2_id = sim.model.body_name2id(self.target2)
         obj1_pos = np.asarray(sim.data.get_body_xpos(self.target1))
         obj2_pos = np.asarray(sim.data.get_body_xpos(self.target2))
 
@@ -33,8 +35,8 @@ class Recording:
         rel2 = obj2_pos - ee_pos
 
         # Gripper aperture
-        left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_left_inner_finger")])
-        right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_right_inner_finger")])
+        left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint1_tip")])
+        right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint2_tip")])
         aperture = np.linalg.norm(left_finger_pos - right_finger_pos)
 
         return np.concatenate([rel1, rel2, [aperture], ee_euler])
@@ -59,7 +61,7 @@ class Recording:
     def get_trajectory(self):
         return self.trajectory
 
-    def save_buffer(self, dir_path):
+    def save_buffer(self, dir_path, ep_num):
         # Ensure the directory exists
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
@@ -70,7 +72,7 @@ class Recording:
         for skill_id in self.skill_ids:
             # Convert the data buffer to bytes
             data_bytes = pickle.dumps(self.data_buffer[skill_id])
-            file_path = dir_path + skill_id + '.zip'
+            file_path = dir_path + skill_id + f' episode {ep_num}.zip'
             # Write the bytes to a zip file
             with zipfile.ZipFile(file_path, 'w') as zip_file:
                 with zip_file.open('data.pkl', 'w', force_zip64=True) as file:

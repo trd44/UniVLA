@@ -1,12 +1,12 @@
 """
 Example usage:
 python run_libero_eval.py \
-    --task_suite_name libero_10 \
-    --action_decoder_path ../../../univla-7b-224-sft-libero/univla-libero-10/action_decoder.pt \
-    --pretrained_checkpoint ../../../univla-7b-224-sft-libero/univla-libero-10 \
+    --task_suite_name libero_goal \
+    --action_decoder_path ../../../univla-7b-224-sft-libero/univla-libero-goal/action_decoder.pt \
+    --pretrained_checkpoint ../../../univla-7b-224-sft-libero/univla-libero-goal \
     --save_video True \
     --num_trials_per_task 1 \
-    --run_id_note "my_first_libero_10_test"
+    --run_id_note "libero_goal"
 """
 
 import os
@@ -23,7 +23,7 @@ import numpy as np
 import tqdm
 from libero.libero import benchmark
 from collections import deque
-from libero.record import Recording
+from record import Recording
 
 import wandb
 
@@ -255,9 +255,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
     latent_action_detokenize = [f'<ACT_{i}>' for i in range(32)]
 
-    # Instantiate trajectory recorder
-    recorder = Recording(env)
-
     # Start evaluation
     total_episodes, total_successes = 0, 0
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
@@ -270,6 +267,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
         # Initialize LIBERO environment and task description
         env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
+        # Instantiate trajectory recorder
+        recorder = Recording(env)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
