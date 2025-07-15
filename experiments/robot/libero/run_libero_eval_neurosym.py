@@ -27,6 +27,12 @@ from libero.record import Recording
 
 import wandb
 
+from diffusion_policy.gym_util.async_vector_env import AsyncVectorEnv
+from diffusion_policy.gym_util.multistep_wrapper import MultiStepWrapper
+from executor import *
+import gym
+from scipy.spatial.transform import Rotation as R
+
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
 from experiments.robot.libero.libero_utils import (
@@ -97,133 +103,86 @@ class GenerateConfig:
 
     seed: int = 7                                    # Random Seed (for reproducibility)
 
+def termination_indicator(operator):
+    if operator == 'pickplace':
+        def Beta(state, symgoal):
+            condition = state[f"on({symgoal[0]},{symgoal[1]})"] and not state[f"grasped({symgoal[0]})"]
+            return condition
+    else:
+        def Beta(state, symgoal):
+            return False
+    return Beta
 
-from prismatic.models.policy.transformer_utils import MAPBlock
+# Create an env wrapper which transforms the outputs of reset() and step() into gym formats (and not gymnasium formats)
+class GymWrapper(gym.Env):
+    def __init__(self, env):
+        self.env = env
+        self.action_space = env.action_space
+        # set up observation space
+        self.obs_dim = 10
 
-
-class MLPResNetBlock(nn.Module):
-    """One MLP ResNet block with a residual connection."""
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-        self.ffn = nn.Sequential(  # feedforward network, similar to the ones in Transformers
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim),
-            nn.ReLU(),
-        )
-
-    def forward(self, x):
-        # x: (batch_size, hidden_dim)
-        # We follow the module ordering of "Pre-Layer Normalization" feedforward networks in Transformers as
-        # described here: https://arxiv.org/pdf/2002.04745.pdf
-        identity = x
-        x = self.ffn(x)
-        x = x + identity
-        return x
-
-
-class ActionDecoderHead(torch.nn.Module):
-    def __init__(self, window_size = 5):
-        super().__init__()
-        self.latent_action_pool = MAPBlock(n_latents = 1, vis_dim = 4096, embed_dim = 512, n_heads = 8)
-        self.visual_pool = MAPBlock(n_latents = 1, vis_dim = 4096, embed_dim = 512, n_heads = 8)
-
-        self.proj = nn.Sequential(
-                                nn.Linear(512, 7 * window_size),
-                                nn.Tanh(),
-                    )
-
-    def forward(self, latent_action_tokens, visual_embed):
-        latent_action_tokens = latent_action_tokens[:, -4:]
-        visual_embed = self.visual_pool(visual_embed)
-        action = self.proj(self.latent_action_pool(latent_action_tokens, init_embed = visual_embed))
-        
-        return action
-
-
-class ActionDecoder(nn.Module):
-    def __init__(self,window_size=5):
-        super().__init__()
-        self.net = ActionDecoderHead(window_size=window_size)
-
-        self.temporal_size = window_size
-        self.temporal_mask = torch.flip(torch.triu(torch.ones(self.temporal_size, self.temporal_size, dtype=torch.bool)), dims=[1]).numpy()
-        
-        self.action_buffer = np.zeros((self.temporal_mask.shape[0], self.temporal_mask.shape[0], 7))
-        self.action_buffer_mask = np.zeros((self.temporal_mask.shape[0], self.temporal_mask.shape[0]), dtype=np.bool_)
-
-        # Action chunking with temporal aggregation
-        balancing_factor = 0.1
-        self.temporal_weights = np.array([np.exp(-1 * balancing_factor * i) for i in range(self.temporal_size)])[:, None]
-
+        high = np.inf * np.ones(self.obs_dim)
+        low = -high
+        self.observation_space = gym.spaces.Box(low, high, dtype=np.float64)
 
     def reset(self):
-        self.action_buffer = np.zeros((self.temporal_mask.shape[0], self.temporal_mask.shape[0], 7))
-        self.action_buffer_mask = np.zeros((self.temporal_mask.shape[0], self.temporal_mask.shape[0]), dtype=np.bool_)
-
+        obs, info = self.env.reset()
+        return obs
     
-    def forward(self, latent_actions, visual_embed, mask, action_low, action_high):
-        # Forward action decoder
-        pred_action = self.net(latent_actions.to(torch.float), visual_embed.to(torch.float)).reshape(-1, self.temporal_size, 7)
-        pred_action = np.array(pred_action.tolist())
-        
-        # Shift action buffer
-        self.action_buffer[1:, :, :] = self.action_buffer[:-1, :, :]
-        self.action_buffer_mask[1:, :] = self.action_buffer_mask[:-1, :]
-        self.action_buffer[:, :-1, :] = self.action_buffer[:, 1:, :]
-        self.action_buffer_mask[:, :-1] = self.action_buffer_mask[:, 1:]
-        self.action_buffer_mask = self.action_buffer_mask * self.temporal_mask
+    def set_target(self, target1, target2):
+        self.target1 = target1
+        self.target2 = target2
 
-        # Add to action buffer
-        self.action_buffer[0] = pred_action  
-        self.action_buffer_mask[0] = np.array([True] * self.temporal_mask.shape[0], dtype=np.bool_)
+    def _get_relative_object_obs(self):
+        sim = self.env.sim
 
-        # Ensemble temporally to predict actions
-        action_prediction = np.sum(self.action_buffer[:, 0, :] * self.action_buffer_mask[:, 0:1] * self.temporal_weights, axis=0) / np.sum(self.action_buffer_mask[:, 0:1] * self.temporal_weights)
-        
-        action_prediction = np.where(
-            mask,
-            0.5 * (action_prediction + 1) * (action_high - action_low) + action_low,
-            action_prediction,
-        )
+        # EE pose and orientation
+        self.gripper_body = sim.model.body_name2id('gripper0_eef')
+        ee_pos = np.asarray(sim.data.body_xpos[self.gripper_body])
+        ee_quat = np.asarray(sim.data.body_xquat[self.gripper_body])
+        ee_euler = R.from_quat(ee_quat).as_euler("xyz")
 
-        return action_prediction
+        # Object positions
+        self.target1 = sim.model.body_name2id(self.target1)
+        self.target2 = sim.model.body_name2id(self.target2)
+        obj1_pos = np.asarray(sim.data.get_body_xpos(self.target1))
+        obj2_pos = np.asarray(sim.data.get_body_xpos(self.target2))
+
+        # Relative positions
+        rel1 = obj1_pos - ee_pos
+        rel2 = obj2_pos - ee_pos
+
+        # Gripper aperture
+        left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_left_inner_finger")])
+        right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_right_inner_finger")])
+        aperture = np.linalg.norm(left_finger_pos - right_finger_pos)
+
+        return np.concatenate([rel1, rel2, [aperture], ee_euler])
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        info["raw_obs"] = obs  # Store raw observation in info for debugging
+
+        return obs, reward, done, info
+
+    def render(self, mode='human', *args, **kwargs):
+        self.env.render()
+
+    def close(self):
+        self.env.close()
+
+    def seed(self, seed=None):
+        self.env.seed(seed)
+
+    def set_task(self, task):
+        self.env.set_task(task)
 
 
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> None:
-    assert cfg.pretrained_checkpoint is not None, "cfg.pretrained_checkpoint must not be None!"
-    if "image_aug" in cfg.pretrained_checkpoint:
-        assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
-    assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
-
     # Set random seed
     set_seed_everywhere(cfg.seed)
-
-    # Set action un-normalization key
-    cfg.unnorm_key = cfg.task_suite_name
-
-    # Load action decoder
-    action_decoder = ActionDecoder(cfg.window_size)
-    action_decoder.net.load_state_dict(torch.load(cfg.action_decoder_path))
-    action_decoder.eval().cuda()
-
-    # Load model
-    model = get_model(cfg)
-
-    # wrapped_model Check that the model contains the action un-normalization key
-    if cfg.model_family == "openvla":
-        # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
-        # with the suffix "_no_noops" in the dataset name)
-        if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
-            cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
-        assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!"
-
-    # wrapped_model Get Hugging Face processor
-    processor = None
-    if cfg.model_family == "openvla":
-        processor = get_processor(cfg)
 
     # Initialize local logging
     run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
@@ -255,9 +214,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
     latent_action_detokenize = [f'<ACT_{i}>' for i in range(32)]
 
-    # Instantiate trajectory recorder
-    recorder = Recording(env)
-
     # Start evaluation
     total_episodes, total_successes = 0, 0
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
@@ -265,34 +221,85 @@ def eval_libero(cfg: GenerateConfig) -> None:
         # Get task
         task = task_suite.get_task(task_id)
 
+        # Load executor
+        pickplace = Executor_Diffusion(id='PickPlace', 
+                        policy=f"./policies/{task}/pickplace.ckpt",
+                        I={}, 
+                        Beta=termination_indicator('pickplace'),
+                        nulified_action_indexes=[],
+                        oracle=True,
+                        wrapper = GymWrapper,
+                        horizon=40)
+
+        # Define targets:
+        target1 = ""
+        target2 = ""
+
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
 
-        # Initialize LIBERO environment and task description
-        env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
+        n_obs_steps = 4
+        n_action_steps = 8
+        max_steps = 20000
+
+        def env_fn():
+            # Initialize LIBERO environment and task description
+            env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
+            # Wrap the environment
+            env = GymWrapper(env)
+            env = MultiStepWrapper(
+                env=env,
+                n_obs_steps=n_obs_steps,
+                n_action_steps=n_action_steps,
+                max_episode_steps=max_steps
+            )
+            print(f"\nTask: {task_description}")
+            log_file.write(f"\nTask: {task_description}\n")
+            return env
+
+        env_fns = [env_fn]
+        dummy_env = env_fn()
+        print(dummy_env.observation_space)
+        obs_dim = 10
+        high = np.inf * np.ones(obs_dim)
+        low = -high
+        observation_space = gym.spaces.Box(low, high, dtype=np.float64)
+        action_space = gym.spaces.Box(low=dummy_env.action_space.low, high=dummy_env.action_space.high, dtype=np.float64)
+        print(observation_space)
+
+        def gen_dummy_env():
+            def dummy_env_fn():
+                # Avoid importing or using env in the main process
+                # to prevent OpenGL context issue with fork.
+                # Create a fake env whose sole purpos is to provide 
+                # obs/action spaces and metadata.
+                env = gym.Env()
+                env.observation_space = observation_space
+                env.action_space = action_space
+                env.metadata = {
+                    'render.modes': ['human', 'rgb_array', 'depth_array'],
+                    'video.frames_per_second': 12
+                }
+                env = MultiStepWrapper(
+                    env=env,
+                    n_obs_steps=n_obs_steps,
+                    n_action_steps=n_action_steps,
+                    max_episode_steps=max_steps
+                )
+                return env
+            return dummy_env_fn
+
+        env = AsyncVectorEnv(env_fns, dummy_env_fn=gen_dummy_env(), shared_memory=False)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
-            print(f"\nTask: {task_description}")
-            log_file.write(f"\nTask: {task_description}\n")
 
             # Reset environment
             env.reset()
-            action_decoder.reset()
-            hist_action = ''
-            prev_hist_action = ['']
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
-
-            print(obs.keys())
-            # Reset recorder with episodic info
-            recorder.reset(
-                skill_id=task_description,
-                target1="",#TODO
-                target2="",#TODO
-            )
 
             # Setup
             t = 0
@@ -308,7 +315,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
             elif cfg.task_suite_name == "libero_90":
                 max_steps = 420  # longest training demo has 373 steps
 
-            action_queue = deque()
             print(f"Starting episode {task_episodes+1}...")
             log_file.write(f"Starting episode {task_episodes+1}...\n")
             while t < max_steps + cfg.num_steps_wait:
@@ -321,66 +327,15 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         continue
                     
                     # Get preprocessed image
-                    img = get_libero_image(obs, resize_size)
+                    img = get_libero_image(info["obs"], resize_size)
 
                     # Save preprocessed image for replay video
                     replay_images.append(img)
 
-                    # Prepare observations dict
-                    # Note: UniVLA does not take proprio state as input
-                    observation = {
-                        "full_image": img,
-                        "state": np.concatenate(
-                            (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
-                        ),
-                    }
+                    # Execute action in executor
+                    obs, success = pickplace.execute(env, obs, task)
 
-                    # Prepare history latent action tokens
-                    start_idx = len(prev_hist_action) if len(prev_hist_action) < 4 else 4
-                    prompt_hist_action_list = [prev_hist_action[idx] for idx in range(-1 * start_idx, 0)]
-                    prompt_hist_action = ''
-                    for latent_action in prompt_hist_action_list:
-                        prompt_hist_action += latent_action
-                    
-                    # Query model to get action
-                    latent_action, visual_embed, generated_ids = get_latent_action(
-                        cfg,
-                        model,
-                        observation,
-                        task_description,
-                        processor=processor,
-                        hist_action=prev_hist_action[-1],
-                    )
-
-                    # Record history latent actions
-                    hist_action = ''
-                    for latent_action_ids in generated_ids[0]:
-                        hist_action += latent_action_detokenize[latent_action_ids.item() - 32001]
-                    prev_hist_action.append(hist_action)
-
-                    
-                    action_norm_stats = model.get_action_stats(cfg.unnorm_key)
-                    mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
-                    action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
-
-                    action = action_decoder(latent_action, visual_embed, mask, action_low, action_high)
-
-                    # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
-                    action = normalize_gripper_action(action, binarize=True)
-
-                    # wrapped_model The dataloader flips the sign of the gripper action to align with other datasets
-                    # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
-                    if cfg.model_family == "openvla":
-                        action = invert_gripper_action(action)
-
-                    # Execute action in environment
-                    obs, reward, done, info = env.step(action.tolist())
-
-                    # Record step in trajectory
-                    if cfg.save_trajectory:
-                        recorder.record_step(action)
-
-                    if done:
+                    if success:
                         task_successes += 1
                         total_successes += 1
                         break
@@ -397,12 +352,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
             if cfg.save_video:
                 # Save a replay video of the episode
                 save_rollout_video(
-                    replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
+                    replay_images, total_episodes, success=done, task_description=task_id, log_file=log_file
                 )
-            if cfg.save_trajectory:
-                # Save trajectory
-                recorder.save_buffer(f"./rollouts/{DATE_TIME}/")
-
             # Log current results
             print(f"Success: {done}")
             print(f"# episodes completed so far: {total_episodes}")
@@ -421,8 +372,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
         if cfg.use_wandb:
             wandb.log(
                 {
-                    f"success_rate/{task_description}": float(task_successes) / float(task_episodes),
-                    f"num_episodes/{task_description}": task_episodes,
+                    f"success_rate/{task_id}": float(task_successes) / float(task_episodes),
+                    f"num_episodes/{task_id}": task_episodes,
                 }
             )
 
