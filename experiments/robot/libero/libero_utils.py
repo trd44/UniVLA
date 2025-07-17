@@ -2,18 +2,15 @@
 
 import math
 import os
-
+import time
 import imageio
 import numpy as np
 import tensorflow as tf
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 
-from experiments.robot.robot_utils import (
-    DATE,
-    DATE_TIME,
-)
-
+DATE = time.strftime("%Y_%m_%d")
+DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
 
 def get_libero_env(task, model_family, resolution=256):
     """Initializes and returns the LIBERO environment, along with the task description."""
@@ -60,9 +57,11 @@ def get_libero_image(obs, resize_size):
 
 def save_rollout_video(rollout_images, idx, success, task_description, log_file=None):
     """Saves an MP4 replay of an episode."""
+    print("SAVING VIDEO TO: ", f"./rollouts/{DATE}")
     rollout_dir = f"./rollouts/{DATE}"
     os.makedirs(rollout_dir, exist_ok=True)
-    processed_task_description = task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
+    #processed_task_description = task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
+    processed_task_description = str(task_description)
     mp4_path = f"{rollout_dir}/{DATE_TIME}--episode={idx}--success={success}--task={processed_task_description}.mp4"
     video_writer = imageio.get_writer(mp4_path, fps=30)
     for img in rollout_images:

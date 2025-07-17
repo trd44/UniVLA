@@ -8,15 +8,20 @@
 import dill
 import torch
 import hydra
+import sys
+import os
 import numpy as np
-from stable_baselines3 import SAC
-from stable_baselines3.common.utils import set_random_seed
 from omegaconf import DictConfig
-from imitation_learning.environments import D4RLEnv
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.workspace.train_diffusion_transformer_lowdim_workspace import TrainDiffusionTransformerLowdimWorkspace
-set_random_seed(0, using_cuda=True)
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+sys.path.insert(0, project_root)
+
+from experiments.robot.libero.libero_utils import (
+    get_libero_image,
+)
+
 
 class Executor():
 	def __init__(self, id, mode, I=None, Beta=None, Circumstance=None, basic=False):
@@ -181,7 +186,7 @@ class Executor_Diffusion(Executor):
             return False
         return True
 
-    def execute(self, env, obs, symgoal, render=False, info = {}, setting="3x3"):
+    def execute(self, env, obs, symgoal, replay_images, render=False, info = {}, setting="3x3"):
         '''
         This method is responsible for executing the policy on the given state. It takes a state as a parameter and returns the action 
         produced by the policy on that state. 
@@ -203,8 +208,8 @@ class Executor_Diffusion(Executor):
             # Prepare the observation for the policy
             if self.oracle:
                 obs = self.prepare_obs(obs, action_step=self.id)
-            if obs_base:
-                obs = self.obs_base_from_info(info)
+            #if obs_base:
+            #    obs = self.obs_base_from_info(info)
             # create obs dict
             np_obs_dict = {
                 'obs': obs.astype(np.float32)
@@ -220,20 +225,21 @@ class Executor_Diffusion(Executor):
             np_action_dict = dict_apply(action_dict,
                 lambda x: x.detach().to('cpu').numpy())
             action = np_action_dict['action']
-            if obs_base:
-                    print("Action: ", action)
-                    obj_to_pick = action[0][0][0]
-                    obj_to_drop = action[0][0][1]
-                    success = round(obj_to_drop) != round(obj_to_pick)
-                    if not success:
-                        action = (round(obj_to_pick), round(obj_to_drop))
-                        print("Invalid task: ", action)
-                        return None, success
-                    obj_to_pick = "cube" + str(round(obj_to_pick))
-                    obj_to_drop = "peg" + str(round(obj_to_drop)-3) if round(obj_to_drop) >= 4 else "cube" + str(round(obj_to_drop))
-                    print("New task: ", (obj_to_pick, obj_to_drop))
-                    env.set_task((obj_to_pick, obj_to_drop))
-                    return (obj_to_pick, obj_to_drop), success
+            #print(action.shape, action)
+            # if obs_base:
+            #         print("Action: ", action)
+            #         obj_to_pick = action[0][0][0]
+            #         obj_to_drop = action[0][0][1]
+            #         success = round(obj_to_drop) != round(obj_to_pick)
+            #         if not success:
+            #             action = (round(obj_to_pick), round(obj_to_drop))
+            #             print("Invalid task: ", action)
+            #             return None, success
+            #         obj_to_pick = "cube" + str(round(obj_to_pick))
+            #         obj_to_drop = "peg" + str(round(obj_to_drop)-3) if round(obj_to_drop) >= 4 else "cube" + str(round(obj_to_drop))
+            #         print("New task: ", (obj_to_pick, obj_to_drop))
+            #         env.set_task((obj_to_pick, obj_to_drop))
+            #         return (obj_to_pick, obj_to_drop), success
             # If the actions in action (array) do not have 4 elements, then concatenate [0] to the action array
             if len(action[0][0]) < 4:
                 # Create a column of zeros
@@ -250,21 +256,19 @@ class Executor_Diffusion(Executor):
                 #done = terminated or truncated
             except:
                 obs, reward, done, info = env.step(action)
+            for i in range(len(info[0]["raw_obs"])):
+                resize_size = 224
+                img = get_libero_image(info[0]["raw_obs"][i], resize_size)
+
+                # Save preprocessed image for replay video
+                replay_images.append(img)
             #done = np.all(done)
             if done:
                 print("Environment terminated")
             step_executor += 1
-            state = info[0]['state'][-1]
-            success = self.Beta(state, symgoal)
-            success = success or info[0]['is_success'][-1]
             if success:
                 done = True
             if step_executor > horizon:
                 print("Reached executor horizon")
                 done = True 
-        if setting == "3x3":
-            valid_state = self.valid_state_f(state)
-            success = success and valid_state
-            if not valid_state:
-                print("Invalid HANOI state")
-        return obs, success
+        return obs, success, replay_images
