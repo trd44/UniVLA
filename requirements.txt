@@ -1,6 +1,6 @@
 absl_py==2.1.0
 accelerate==0.32.1
-braceexpand=0.1.7
+braceexpand==0.1.7
 Calvin.egg==info
 calvin_env==0.0.1
 git+https://github.com/moojink/dlimp_openvla
@@ -26,7 +26,6 @@ Pillow==11.2.1
 piq==0.8.0
 pyquaternion==0.9.9
 pytorch_lightning==1.8.6
-PyYAML==6.0.1
 PyYAML==6.0.2
 Requests==2.32.3
 rich==14.0.0
