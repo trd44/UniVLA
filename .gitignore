@@ -161,3 +161,4 @@ univla-latent-action-model
 # Rollout files
 experiments/robot/libero/rollouts/*
 rollouts/
+vla-scripts/runs/*
