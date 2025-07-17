@@ -233,7 +233,8 @@ def eval_custom_command(cfg: GenerateConfig) -> None:
     latent_action_detokenize = [f"<ACT_{i}>" for i in range(32)]
 
     total_episodes, total_successes, total_drawer_opens = 0, 0, 0
-    for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
+    while total_successes < cfg.num_trials_per_task:
+        episode_idx = total_episodes % 50
         env.reset()
         action_decoder.reset()
         # set initial state once per episode
