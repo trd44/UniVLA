@@ -23,7 +23,6 @@ import numpy as np
 import tqdm
 from libero.libero import benchmark
 from collections import deque
-from libero.record import Recording
 
 import wandb
 
@@ -34,7 +33,11 @@ import gym
 from scipy.spatial.transform import Rotation as R
 
 # Append current directory so that interpreter can find experiments.robot
-sys.path.append("../..")
+#sys.path.append("../..")
+# Always resolves to the project root no matter where the script is run from
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+sys.path.insert(0, project_root)
+
 from experiments.robot.libero.libero_utils import (
     get_libero_dummy_action,
     get_libero_env,
@@ -42,17 +45,6 @@ from experiments.robot.libero.libero_utils import (
     quat2axisangle,
     save_rollout_video,
 )
-from experiments.robot.openvla_utils import get_processor
-from experiments.robot.robot_utils import (
-    DATE_TIME,
-    get_latent_action,
-    get_image_resize_size,
-    get_model,
-    invert_gripper_action,
-    normalize_gripper_action,
-    set_seed_everywhere,
-)
-
 import torch
 import numpy
 import numpy.core.multiarray
@@ -60,13 +52,13 @@ import pickle
 
 # POTENTIALLY DANGEROUS: Only do this if you trust the source of the checkpoint files.
 # This allows specific numpy functions/classes that are needed to load the LIBERO initial states.
-torch.serialization.add_safe_globals([
-    numpy.core.multiarray._reconstruct,
-    numpy.ndarray,
-    numpy.dtype,
-    numpy.dtypes.Float64DType,
-    pickle.UnpicklingError
-])
+# torch.serialization.add_safe_globals([
+#     numpy.core.multiarray._reconstruct,
+#     numpy.ndarray,
+#     numpy.dtype,
+#     numpy.dtypes.Float64DType,
+#     pickle.UnpicklingError
+# ])
 
 @dataclass
 class GenerateConfig:
@@ -87,7 +79,7 @@ class GenerateConfig:
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
-    task_suite_name: str = "libero_10"               # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    task_suite_name: str = "libero_goal"               # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 1                     # Number of rollouts per task
     window_size: int = 12
@@ -114,19 +106,25 @@ def termination_indicator(operator):
     return Beta
 
 # Create an env wrapper which transforms the outputs of reset() and step() into gym formats (and not gymnasium formats)
-class GymWrapper(gym.Env):
-    def __init__(self, env):
+class GymDiffusionWrapper(gym.Env):
+    def __init__(self, env, target1, target2):
         self.env = env
-        self.action_space = env.action_space
+        self.act_dim = 7
+        high = np.inf * np.ones(self.act_dim)
+        low = -high
+        self.action_space = gym.spaces.Box(low, high, dtype=np.float64)
         # set up observation space
         self.obs_dim = 10
 
         high = np.inf * np.ones(self.obs_dim)
         low = -high
         self.observation_space = gym.spaces.Box(low, high, dtype=np.float64)
+        self.target1 = target1
+        self.target2 = target2
 
     def reset(self):
-        obs, info = self.env.reset()
+        obs = self.env.reset()
+        obs = self._get_relative_object_obs()
         return obs
     
     def set_target(self, target1, target2):
@@ -137,31 +135,37 @@ class GymWrapper(gym.Env):
         sim = self.env.sim
 
         # EE pose and orientation
-        self.gripper_body = sim.model.body_name2id('gripper0_eef')
-        ee_pos = np.asarray(sim.data.body_xpos[self.gripper_body])
-        ee_quat = np.asarray(sim.data.body_xquat[self.gripper_body])
+        #print("Get 1")
+        gripper_body = sim.model.body_name2id('gripper0_eef')
+        ee_pos = np.asarray(sim.data.body_xpos[gripper_body])
+        ee_quat = np.asarray(sim.data.body_xquat[gripper_body])
         ee_euler = R.from_quat(ee_quat).as_euler("xyz")
 
         # Object positions
-        self.target1 = sim.model.body_name2id(self.target1)
-        self.target2 = sim.model.body_name2id(self.target2)
+        #print("Get 2")
+        target1_body = sim.model.body_name2id(self.target1)
+        target2_body = sim.model.body_name2id(self.target2)
+        #print("Get 3")
         obj1_pos = np.asarray(sim.data.get_body_xpos(self.target1))
         obj2_pos = np.asarray(sim.data.get_body_xpos(self.target2))
 
+        #print("Get 4")
         # Relative positions
         rel1 = obj1_pos - ee_pos
         rel2 = obj2_pos - ee_pos
 
         # Gripper aperture
-        left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_left_inner_finger")])
-        right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_right_inner_finger")])
+        left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint1_tip")])
+        right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint2_tip")])
         aperture = np.linalg.norm(left_finger_pos - right_finger_pos)
-
+        #print(ee_euler)
         return np.concatenate([rel1, rel2, [aperture], ee_euler])
 
     def step(self, action):
+        #action = np.concatenate([action[:4], np.asarray([0,0,0])])
         obs, reward, done, info = self.env.step(action)
         info["raw_obs"] = obs  # Store raw observation in info for debugging
+        obs = self._get_relative_object_obs()
 
         return obs, reward, done, info
 
@@ -182,10 +186,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> None:
     # Set random seed
-    set_seed_everywhere(cfg.seed)
+    np.random.seed(cfg.seed)
 
     # Initialize local logging
-    run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
+    run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{cfg.seed}"
     if cfg.run_id_note is not None:
         run_id += f"--{cfg.run_id_note}"
     os.makedirs(cfg.local_log_dir, exist_ok=True)
@@ -210,7 +214,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
     log_file.write(f"Tested Ckpt': {cfg.pretrained_checkpoint.split('/')[-1]} \n")
 
     # Get expected image dimensions
-    resize_size = get_image_resize_size(cfg)
+    resize_size = 224
 
     latent_action_detokenize = [f'<ACT_{i}>' for i in range(32)]
 
@@ -219,21 +223,23 @@ def eval_libero(cfg: GenerateConfig) -> None:
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
 
         # Get task
+        task_id = 1
         task = task_suite.get_task(task_id)
 
         # Load executor
         pickplace = Executor_Diffusion(id='PickPlace', 
-                        policy=f"./policies/{task}/pickplace.ckpt",
+                        policy=f"/home/hrilab/Documents/.vlas/vla-benchmarking/libero_diff_policies/18.04.13_train_diffusion_transformer_lowdim_on_stove/checkpoints/latest.ckpt",
                         I={}, 
                         Beta=termination_indicator('pickplace'),
                         nulified_action_indexes=[],
-                        oracle=True,
-                        wrapper = GymWrapper,
-                        horizon=40)
+                        #oracle=True,
+                        wrapper = GymDiffusionWrapper,
+                        horizon=15000)
+        pickplace.load_policy()
 
         # Define targets:
-        target1 = ""
-        target2 = ""
+        target1 = "akita_black_bowl_1_main"
+        target2 = "flat_stove_1_burner_plate"
 
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
@@ -246,7 +252,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
             # Initialize LIBERO environment and task description
             env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
             # Wrap the environment
-            env = GymWrapper(env)
+            env = GymDiffusionWrapper(env, target1, target2)
+            env.set_target(target1, target2)
             env = MultiStepWrapper(
                 env=env,
                 n_obs_steps=n_obs_steps,
@@ -254,7 +261,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 max_episode_steps=max_steps
             )
             print(f"\nTask: {task_description}")
-            log_file.write(f"\nTask: {task_description}\n")
+            #log_file.write(f"\nTask: {task_description}\n")
             return env
 
         env_fns = [env_fn]
@@ -276,6 +283,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 env = gym.Env()
                 env.observation_space = observation_space
                 env.action_space = action_space
+                env = GymDiffusionWrapper(env, target1, target2)
                 env.metadata = {
                     'render.modes': ['human', 'rgb_array', 'depth_array'],
                     'video.frames_per_second': 12
@@ -289,51 +297,61 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 return env
             return dummy_env_fn
 
+        print("Init env")
         env = AsyncVectorEnv(env_fns, dummy_env_fn=gen_dummy_env(), shared_memory=False)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
+        print("Starting experiment")
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
 
             # Reset environment
+            print("Reset env")
             env.reset()
 
             # Set initial states
-            obs = env.set_init_state(initial_states[episode_idx])
+            print("Set init state")
+            #obs = env.set_init_state(initial_states[episode_idx])
 
             # Setup
             t = 0
             replay_images = []
             if cfg.task_suite_name == "libero_spatial":
-                max_steps = 240  # longest training demo has 193 steps
+                max_steps = 240 / 8  # longest training demo has 193 steps
             elif cfg.task_suite_name == "libero_object":
-                max_steps = 300  # longest training demo has 254 steps
+                max_steps = 300 / 8 # longest training demo has 254 steps
             elif cfg.task_suite_name == "libero_goal":
-                max_steps = 320  # longest training demo has 270 steps
+                max_steps = 320 / 8 # longest training demo has 270 steps
             elif cfg.task_suite_name == "libero_10":
-                max_steps = 550  # longest training demo has 505 steps
+                max_steps = 550 / 8 # longest training demo has 505 steps
             elif cfg.task_suite_name == "libero_90":
-                max_steps = 420  # longest training demo has 373 steps
+                max_steps = 420 / 8 # longest training demo has 373 steps
 
             print(f"Starting episode {task_episodes+1}...")
             log_file.write(f"Starting episode {task_episodes+1}...\n")
+            success = False
             while t < max_steps + cfg.num_steps_wait:
                 try:
                     # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
                     # and we need to wait for them to fall
                     if t < cfg.num_steps_wait:
-                        obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                        obs, reward, done, info = env.step([[get_libero_dummy_action(cfg.model_family),
+                                                            get_libero_dummy_action(cfg.model_family),
+                                                            get_libero_dummy_action(cfg.model_family),
+                                                            get_libero_dummy_action(cfg.model_family)]])
                         t += 1
                         continue
                     
                     # Get preprocessed image
-                    img = get_libero_image(info["obs"], resize_size)
+                    #print(info[-1]["raw_obs"][-1].keys())
+                    for i in range(len(info[0]["raw_obs"])):
+                        img = get_libero_image(info[0]["raw_obs"][i], resize_size)
 
-                    # Save preprocessed image for replay video
-                    replay_images.append(img)
+                        # Save preprocessed image for replay video
+                        replay_images.append(img)
 
                     # Execute action in executor
-                    obs, success = pickplace.execute(env, obs, task)
+                    obs, success, replay_images = pickplace.execute(env, obs, task, replay_images)
 
                     if success:
                         task_successes += 1
@@ -351,8 +369,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             if cfg.save_video:
                 # Save a replay video of the episode
+                print(len(replay_images))
                 save_rollout_video(
-                    replay_images, total_episodes, success=done, task_description=task_id, log_file=log_file
+                    replay_images, total_episodes, success=success, task_description=task_id, log_file=log_file
                 )
             # Log current results
             print(f"Success: {done}")
