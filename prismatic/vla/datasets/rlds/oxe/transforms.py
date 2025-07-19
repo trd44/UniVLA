@@ -879,6 +879,51 @@ def human_dataset_transform(sample: Dict[str, Any]) -> Dict[str, Any]:
     return sample
 
 
+def hanoi_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    # Decode images if needed
+    def decode_image_if_needed(image, key_name):
+        # Handles tf.Tensor of dtype string/bytes, shape [T,]
+        if isinstance(image, tf.Tensor) and image.dtype == tf.string:
+            # Print the first few bytes of the first frame to guess format
+            first_bytes = image[0].numpy()[:10] if hasattr(image[0], 'numpy') else None
+            # if first_bytes is not None:
+            #     print(f"{key_name} first 10 bytes: {first_bytes}")
+            #     # PNG: b'\x89PNG\r\n\x1a\n'  JPEG: b'\xff\xd8\xff'
+            #     if first_bytes.startswith(b'\x89PNG'):
+            #         print(f"{key_name} appears to be PNG")
+            #     elif first_bytes.startswith(b'\xff\xd8\xff'):
+            #         print(f"{key_name} appears to be JPEG")
+            #     else:
+            #         print(f"{key_name} format unknown")
+            # else:
+            #     print(f"{key_name}: couldn't inspect bytes")
+            decoded = tf.map_fn(tf.io.decode_image, image, fn_output_signature=tf.uint8)
+            # print(f"Decoded '{key_name}': type={type(decoded)}, dtype={decoded.dtype}, shape={decoded.shape}")
+            return decoded
+        else:
+            print(f"'{key_name}' already decoded or not present: type={type(image)}, dtype={getattr(image, 'dtype', None)}, shape={getattr(image, 'shape', None)}")
+            return image  # already decoded or not present
+
+    if "image" in trajectory["observation"]:
+        trajectory["observation"]["image"] = decode_image_if_needed(trajectory["observation"]["image"], "image")
+    if "wrist_image" in trajectory["observation"]:
+        trajectory["observation"]["wrist_image"] = decode_image_if_needed(trajectory["observation"]["wrist_image"], "wrist_image")
+
+    trajectory["action"] = trajectory["action"]  # assuming correct already
+    trajectory["observation"]["EEF_state"] = trajectory["observation"]["state"][:, :6]
+    trajectory["observation"]["gripper_state"] = trajectory["observation"]["state"][:, -1:]
+    trajectory["language_instruction"] = trajectory["observation"].get("natural_language_instruction", "")
+
+    # Print summary after transformation
+    # obs = trajectory["observation"]
+    # for key in ["image", "wrist_image"]:
+    #     if key in obs:
+    #         img = obs[key]
+    #         print(f"After transform: '{key}' type={type(img)}, dtype={getattr(img, 'dtype', None)}, shape={getattr(img, 'shape', None)}")
+
+    return trajectory
+
+
 # === Registry ===
 OXE_STANDARDIZATION_TRANSFORMS = {
     "bridge_oxe": bridge_oxe_dataset_transform,
@@ -969,4 +1014,6 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "ego4d_split_2": human_dataset_transform,
     "ego4d_split_3": human_dataset_transform,
     "ego4d_split_4": human_dataset_transform,
+    ### Custom
+    "hanoi_full": libero_dataset_transform,
 }

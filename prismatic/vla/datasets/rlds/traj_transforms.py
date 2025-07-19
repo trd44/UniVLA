@@ -38,8 +38,16 @@ def chunk_act_obs(traj, window_size, future_action_window_size):
     floored_action_chunk_indices = tf.minimum(tf.maximum(action_chunk_indices, 0), goal_timestep[:, None])
 
     traj["observation"] = tf.nest.map_structure(lambda x: tf.gather(x, floored_chunk_indices), traj["observation"])
+    # PATCH: Set static shapes for chunked observations (only set known dims)
+    for k, v in traj["observation"].items():
+        if hasattr(v, "set_shape"):
+            # Only set the known dimensions (None, window_size), let others be dynamic
+            v.set_shape([None, window_size])
     traj["action"] = tf.gather(traj["action"], floored_action_chunk_indices)
-
+    # PATCH: Set static shape for chunked actions
+    if hasattr(traj["action"], "set_shape"):
+        traj["action"].set_shape([None, window_size + future_action_window_size, action_dim])
+    
     # indicates whether an entire observation is padding
     traj["observation"]["pad_mask"] = chunk_indices >= 0
 
@@ -98,8 +106,16 @@ def chunk_act_obs_libero(traj: Dict, window_size: int, future_action_window_size
     floored_action_chunk_indices = tf.minimum(tf.maximum(action_chunk_indices, 0), goal_timestep[:, None])
 
     traj["observation"] = tf.nest.map_structure(lambda x: tf.gather(x, floored_chunk_indices), traj["observation"])
+    # PATCH: Set static shapes for chunked observations (only set known dims)
+    for k, v in traj["observation"].items():
+        if hasattr(v, "set_shape"):
+            # Only set the known dimensions (None, window_size), let others be dynamic
+            v.set_shape([None, window_size])
     traj["action"] = tf.gather(traj["action"], floored_action_chunk_indices)
-
+    # PATCH: Set static shape for chunked actions
+    if hasattr(traj["action"], "set_shape"):
+        traj["action"].set_shape([None, window_size + future_action_window_size, action_dim])
+    
     # indicates whether an entire observation is padding
     traj["observation"]["pad_mask"] = chunk_indices >= 0
 

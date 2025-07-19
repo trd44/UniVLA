@@ -113,13 +113,13 @@ class FinetuneConfig:
     adapter_tmp_dir: Path = Path("adapter-tmp")                     # Temporary directory for LoRA weights before fusing
 
     # Fine-tuning Parameters
-    batch_size: int = 8                                             # Fine-tuning batch size
+    batch_size: int = 1                                         # Fine-tuning batch size
     max_steps: int = 30000                                          # Max number of fine-tuning steps
     save_steps: int = 30000                                         # Interval for checkpoint saving
     learning_rate: float = 3.5e-4                                   # Fine-tuning learning rate
-    grad_accumulation_steps: int = 2                                # Gradient accumulation steps
+    grad_accumulation_steps: int = 1                                # Gradient accumulation steps
     image_aug: bool = True                                          # Whether to train with image augmentations
-    shuffle_buffer_size: int = 16000                                # Dataloader shuffle buffer size (can reduce if OOM)
+    shuffle_buffer_size: int = 500                                 # Dataloader shuffle buffer size (can reduce if OOM)
     save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run and
                                                                     #   continually。overwrite the latest checkpoint
                                                                     #   (If False, saves all checkpoints)
@@ -131,7 +131,7 @@ class FinetuneConfig:
     lam_enc_blocks: int = 12
     lam_dec_blocks: int = 12
     lam_num_heads: int = 12
-    window_size: int = 12
+    window_size: int = 1
         
     # LoRA Arguments
     freeze_vla: bool = False
@@ -294,6 +294,12 @@ def finetune(cfg: FinetuneConfig) -> None:
         print("Error occurred in vla_dataset iteration:", e)
         raise
 
+    print("Sample keys:", sample.keys())
+    if "pixel_values" in sample:
+        print("pixel_values shape:", sample["pixel_values"].shape)
+        print("pixel_values dtype:", sample["pixel_values"].dtype)
+        print("pixel_values min/max:", sample["pixel_values"].min().item(), sample["pixel_values"].max().item())
+
     # [Important] Save Dataset Statistics =>> used to de-normalize actions for inference!
     if distributed_state.is_main_process:
         save_dataset_statistics(vla_dataset.dataset_statistics, run_dir)
@@ -325,7 +331,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         optimizer.zero_grad()
         print("==== About to start DataLoader iteration ====")
         for batch_idx, batch in enumerate(dataloader):
-            print(f"==== Got batch {batch_idx} ====")
+            # print(f"==== Got batch {batch_idx} ====")
             batch["input_ids"] = batch["input_ids"].to(device_id)
             batch["attention_mask"] = batch["attention_mask"].to(device_id)
             batch["labels"] = batch["labels"].to(device_id)

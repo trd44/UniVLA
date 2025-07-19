@@ -12,21 +12,34 @@ import dlimp as dl
 import tensorflow as tf
 from absl import logging
 
+def safe_set_shape(tensor, shape):
+    if hasattr(tensor, "set_shape") and hasattr(tensor, "shape"):
+        try:
+            # Only set shape if rank matches
+            if tensor.shape.rank == len(shape):
+                tensor.set_shape(shape)
+        except Exception:
+            pass
+    return tensor
 
 # ruff: noqa: B023
 def augment(obs: Dict, seed: tf.Tensor, augment_kwargs: Union[Dict, Dict[str, Dict]]) -> Dict:
-    """Augments images, skipping padding images."""
+    """Augments images, skipping padding images and invalid tensors."""
     image_names = {key[6:] for key in obs if key.startswith("image_")}
 
-    # "augment_order" is required in augment_kwargs, so if it's there, we can assume that the user has passed
-    # in a single augmentation dict (otherwise, we assume that the user has passed in a mapping from image
-    # name to augmentation dict)
     if "augment_order" in augment_kwargs:
         augment_kwargs = {name: augment_kwargs for name in image_names}
 
     for i, name in enumerate(image_names):
         if name not in augment_kwargs:
             continue
+        image = obs[f"image_{name}"]
+        # --- PATCH START: Skip images that aren't valid 3D or 4D tensors ---
+        if not (hasattr(image, "shape") and (image.shape.rank == 3 or image.shape.rank == 4)):
+            # Just skip augmentation for this field
+            print(f'skipping augment')
+            continue
+        # --- PATCH END ---
         kwargs = augment_kwargs[name]
         logging.debug(f"Augmenting image_{name} with kwargs {kwargs}")
         obs[f"image_{name}"] = tf.cond(
@@ -35,7 +48,7 @@ def augment(obs: Dict, seed: tf.Tensor, augment_kwargs: Union[Dict, Dict[str, Di
                 obs[f"image_{name}"],
                 **kwargs,
                 seed=seed + i,  # augment each image differently
-            ),                                                                                                                                                                                                                                                                                                            
+            ),
             lambda: obs[f"image_{name}"],  # skip padding images
         )
 
@@ -50,52 +63,85 @@ def decode_and_resize(
     """Decodes images and depth images, and then optionally resizes them."""
     image_names = {key[6:] for key in obs if key.startswith("image_")}
     depth_names = {key[6:] for key in obs if key.startswith("depth_")}
-    print('image_names', image_names)
-    # print('depth_names', depth_names)
     if isinstance(resize_size, tuple):
         resize_size = {name: resize_size for name in image_names}
     if isinstance(depth_resize_size, tuple):
         depth_resize_size = {name: depth_resize_size for name in depth_names}
 
-    print('keys', obs.keys())
     for name in image_names:
-        if name not in resize_size:
-            logging.warning(
-                f"No resize_size was provided for image_{name}. This will result in 1x1 "
-                "padding images, which may cause errors if you mix padding and non-padding images."
-            )
         image = obs[f"image_{name}"]
-        if image.dtype == tf.string:
-            if tf.strings.length(image) == 0:
-                # this is a padding image
-                image = tf.zeros((*resize_size.get(name, (1, 1)), 3), dtype=tf.uint8)
+
+        def process_img(img_bytes):
+            # If empty string, return zeros
+            if img_bytes.dtype == tf.string:
+                return tf.cond(
+                    tf.strings.length(img_bytes) == 0,
+                    lambda: tf.zeros([256, 256, 3], dtype=tf.uint8),
+                    lambda: tf.io.decode_image(img_bytes, expand_animations=False, dtype=tf.uint8)
+                )
+            elif img_bytes.dtype == tf.uint8:
+                return img_bytes
             else:
-                image = tf.io.decode_image(image, expand_animations=False, dtype=tf.uint8)
-        elif image.dtype != tf.uint8:
-            raise ValueError(f"Unsupported image dtype: found image_{name} with dtype {image.dtype}")
+                raise ValueError(f"Unsupported image dtype: found image_{name} with dtype {img_bytes.dtype}")
+
+        # Map over per-timestep images
+        if image.dtype == tf.string and image.shape.rank == 1:
+            image = tf.map_fn(process_img, image, fn_output_signature=tf.TensorSpec([256,256,3], dtype=tf.uint8))
+        else:
+            image = process_img(image)
+
+        # Always set static shape after decoding
+        image = safe_set_shape(image, [256, 256, 3])
+
+        # Resize if needed
         if name in resize_size:
-            image = dl.transforms.resize_image(image, size=resize_size[name])
-        obs[f"image_{name}"] = image
+            # Only attempt resize if shape is known and is rank 3 or 4
+            if (
+                hasattr(image, "shape")
+                and image.shape.rank in [3, 4]
+                and all([s is not None and s > 0 for s in image.shape.as_list()])
+            ):
+                image = dl.transforms.resize_image(image, size=resize_size[name])
+                image = safe_set_shape(image, [resize_size[name][0], resize_size[name][1], 3])
+            else:
+                # If image is not proper shape for resizing, skip
+                pass
+            obs[f"image_{name}"] = image
 
     for name in depth_names:
-        if name not in depth_resize_size:
-            logging.warning(
-                f"No depth_resize_size was provided for depth_{name}. This will result in 1x1 "
-                "padding depth images, which may cause errors if you mix padding and non-padding images."
-            )
         depth = obs[f"depth_{name}"]
 
-        if depth.dtype == tf.string:
-            if tf.strings.length(depth) == 0:
-                depth = tf.zeros((*depth_resize_size.get(name, (1, 1)), 1), dtype=tf.float32)
+        def process_depth(depth_bytes):
+            if depth_bytes.dtype == tf.string:
+                return tf.cond(
+                    tf.strings.length(depth_bytes) == 0,
+                    lambda: tf.zeros([256, 256, 1], dtype=tf.float32),
+                    lambda: tf.io.decode_image(depth_bytes, expand_animations=False, dtype=tf.float32)[..., 0:1]
+                )
+            elif depth_bytes.dtype == tf.float32:
+                return depth_bytes
             else:
-                depth = tf.io.decode_image(depth, expand_animations=False, dtype=tf.float32)[..., 0]
-        elif depth.dtype != tf.float32:
-            raise ValueError(f"Unsupported depth dtype: found depth_{name} with dtype {depth.dtype}")
+                raise ValueError(f"Unsupported depth dtype: found depth_{name} with dtype {depth_bytes.dtype}")
+
+        if depth.dtype == tf.string and depth.shape.rank == 1:
+            depth = tf.map_fn(process_depth, depth, fn_output_signature=tf.TensorSpec([256,256,1], dtype=tf.float32))
+        else:
+            depth = process_depth(depth)
+
+        depth = safe_set_shape(depth, [256, 256, 1])
 
         if name in depth_resize_size:
-            depth = dl.transforms.resize_depth_image(depth, size=depth_resize_size[name])
-
-        obs[f"depth_{name}"] = depth
+            # Only attempt resize if shape is known and is rank 3 or 4
+            if (
+                hasattr(depth, "shape")
+                and depth.shape.rank in [3, 4]
+                and all([s is not None and s > 0 for s in depth.shape.as_list()])
+            ):
+                depth = dl.transforms.resize_depth_image(depth, size=depth_resize_size[name])
+                depth = safe_set_shape(depth, [depth_resize_size[name][0], depth_resize_size[name][1], 1])
+            else:
+                # If depth is not proper shape for resizing, skip
+                pass
+            obs[f"depth_{name}"] = depth
 
     return obs

@@ -4,6 +4,11 @@ dataset.py
 Core interface script for configuring and initializing RLDS datasets.
 """
 
+import tensorflow as tf
+# tf.data.experimental.enable_debug_mode()
+
+import sys
+
 import copy
 import inspect
 import json
@@ -188,6 +193,12 @@ def make_dataset_from_rlds(
         # extracts `language_key` into the "task" dict
         task = {}
         if language_key is not None:
+            if not isinstance(traj[language_key], tf.Tensor):
+                traj[language_key] = tf.convert_to_tensor(traj[language_key], dtype=tf.string)
+            if traj[language_key].shape.rank == 0:
+                traj[language_key] = tf.repeat(traj[language_key][None], traj_len)
+            elif traj[language_key].shape.rank == 1 and tf.shape(traj[language_key])[0] != traj_len:
+                traj[language_key] = tf.repeat(traj[language_key][:1], traj_len)
             if traj[language_key].dtype != tf.string:
                 raise ValueError(
                     f"Language key {language_key} has dtype {traj[language_key].dtype}, " "but it must be tf.string."
@@ -435,6 +446,7 @@ def apply_frame_transforms(
         num_parallel_calls (int): number of parallel calls for frame_map operations. Default to AUTOTUNE.
     """
 
+    print("Starting apply_frame_transforms")
     # Convenience wrapper that takes a function that operates on a non-chunked "observation" dict and applies
     # it to the chunked "observation" dict as well as the non-chunked "task" dict
     def apply_obs_transform(fn: Callable[[Dict], Dict], frame: Dict) -> Dict:
@@ -442,6 +454,7 @@ def apply_frame_transforms(
         frame["observation"] = dl.vmap(fn)(frame["observation"])
         return frame
 
+    print("Before decode_and_resize frame_map")
     # Decode + resize images (and depth images)
     dataset = dataset.frame_map(
         partial(
@@ -450,8 +463,10 @@ def apply_frame_transforms(
         ),
         num_parallel_calls,
     )
+    print("After decode_and_resize frame_map")
 
     if train:
+        print("Before augmentation frame_map")
         # Augment all images with the same seed, skipping padding images
         def aug(frame: dict):
             seed = tf.random.uniform([2], maxval=tf.dtypes.int32.max, dtype=tf.int32)
@@ -459,7 +474,9 @@ def apply_frame_transforms(
             return apply_obs_transform(aug_fn, frame)
 
         dataset = dataset.frame_map(aug, num_parallel_calls)
+        print("After augmentation frame_map")
 
+    print("Finishing apply_frame_transforms")
     return dataset
 
 
@@ -620,6 +637,30 @@ def make_interleaved_dataset(
     # [Contract] When training VLA Policies, we let the Collator handle Batching!
     if batch_size is not None:
         dataset = dataset.batch(batch_size)
+
+        # --- PATCH: Explicitly set shape for all batched image fields and print debug info ---
+        def set_batch_shapes_and_debug(batch):
+            # Set shapes for image fields if possible, and print key/type/shape for all fields.
+            out = {}
+            for k, v in batch.items():
+                # Try to set shape for images, which should be [batch_size, 224, 224, 3] or similar.
+                try:
+                    # Only attempt for 4D tensors (images)
+                    if hasattr(v, "shape") and hasattr(v, "set_shape") and v.shape.rank is not None and v.shape.rank >= 3:
+                        # If 4D (batched images), set first dim to None (batch), rest to as known
+                        shape = v.shape.as_list()
+                        # If rank == 4, set shape to [None, ...]
+                        if v.shape.rank == 4:
+                            v.set_shape([None] + shape[1:])
+                        # If rank == 3, just set shape (single frame), leave as is
+                    print(f"[DEBUG batch] Key: {k}, type: {type(v)}, dtype: {getattr(v, 'dtype', None)}, shape: {getattr(v, 'shape', None)}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[DEBUG batch] Key: {k}, error inspecting/setting shape: {e}", file=sys.stderr)
+                out[k] = v
+            return out
+
+        # Apply shape setter/debug print as a final map after batching
+        dataset = dataset.map(set_batch_shapes_and_debug, num_parallel_calls=tf.data.AUTOTUNE)
 
     # Note =>> Seems to reduce memory usage without affecting speed?
     dataset = dataset.with_ram_budget(1)

@@ -97,6 +97,11 @@ class RLDSBatchTransformLIBERO_withHis:
         # img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
 
+        # for i, image in enumerate(rlds_batch["observation"]["image_primary"]):
+        #     print(f"IMAGE {i} SHAPE: {getattr(image, 'shape', None)}")
+        #     if hasattr(image, 'shape') and any([d is not None and d <= 0 for d in image.shape]):
+        #         print(f"BAD IMAGE SHAPE AT INDEX {i}: {image.shape}")
+        #         raise ValueError(f"BAD IMAGE SHAPE AT INDEX {i}: {image.shape}")  # or return None to skip this sample
         randomized_overlap = random.randint(0,1)
         img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
         img_k = Image.fromarray(rlds_batch["observation"]["image_primary"][self.window_size-1])
@@ -380,11 +385,29 @@ class RLDSDataset(IterableDataset):
         self.dataset, self.dataset_length, self.dataset_statistics = self.make_dataset(rlds_config)
 
     def make_dataset(self, rlds_config):
-        return make_interleaved_dataset(**rlds_config)
+        print("[DEBUG RLDSDataset] make_dataset called")
+        dataset, dataset_length, dataset_statistics = make_interleaved_dataset(**rlds_config)
+        print("[DEBUG RLDSDataset] make_dataset finished")
+        return dataset, dataset_length, dataset_statistics
 
     def __iter__(self) -> Dict[str, Any]:
-        for rlds_batch in self.dataset.as_numpy_iterator():
-            yield self.batch_transform(rlds_batch)
+        # print("[DEBUG RLDSDataset] __iter__ called, about to call as_numpy_iterator()")
+        try:
+            rlds_iter = self.dataset.as_numpy_iterator()
+            print("[DEBUG RLDSDataset] got as_numpy_iterator")
+            for i, rlds_batch in enumerate(rlds_iter):
+                # print(f"[DEBUG RLDSDataset] fetched batch {i}")
+                try:
+                    result = self.batch_transform(rlds_batch)
+                    # print(f"[DEBUG RLDSDataset] batch_transform succeeded for batch {i}")
+                except Exception as e:
+                    # print(f"[DEBUG RLDSDataset] batch_transform FAILED for batch {i}: {e}")
+                    raise
+                yield result
+                # print(f"[DEBUG RLDSDataset] yielded batch {i}")
+        except Exception as e:
+            print(f"[DEBUG RLDSDataset] EXCEPTION in __iter__: {e}")
+            raise
 
     def __len__(self) -> int:
         return self.dataset_length
