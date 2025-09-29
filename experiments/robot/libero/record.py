@@ -19,27 +19,35 @@ class Recording:
         sim = self.env.sim
 
         # EE pose and orientation
-        self.gripper_body = sim.model.body_name2id('gripper0_eef')
-        ee_pos = np.asarray(sim.data.body_xpos[self.gripper_body])
-        ee_quat = np.asarray(sim.data.body_xquat[self.gripper_body])
+        gripper_body = sim.model.body_name2id('gripper0_eef')
+        ee_pos = np.asarray(sim.data.body_xpos[gripper_body])
+        ee_quat = np.asarray(sim.data.body_xquat[gripper_body])
         ee_euler = R.from_quat(ee_quat).as_euler("xyz")
 
         # Object positions
-        self.target1_id = sim.model.body_name2id(self.target1)
-        self.target2_id = sim.model.body_name2id(self.target2)
+        #self.target1_id = sim.model.body_name2id(self.target1)
+        #self.target2_id = sim.model.body_name2id(self.target2)
         obj1_pos = np.asarray(sim.data.get_body_xpos(self.target1))
+        obj1_quat = np.asarray(sim.data.get_body_xquat(self.target1))
+        obj1_euler = R.from_quat(obj1_quat).as_euler("xyz")
         obj2_pos = np.asarray(sim.data.get_body_xpos(self.target2))
+        obj2_quat = np.asarray(sim.data.get_body_xquat(self.target2))
+        obj2_euler = R.from_quat(obj2_quat).as_euler("xyz")
 
         # Relative positions
         rel1 = obj1_pos - ee_pos
         rel2 = obj2_pos - ee_pos
+
+        # Relative angles
+        a_rel1 = obj1_euler - ee_euler
+        a_rel2 = obj2_euler - ee_euler
 
         # Gripper aperture
         left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint1_tip")])
         right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint2_tip")])
         aperture = np.linalg.norm(left_finger_pos - right_finger_pos)
 
-        return np.concatenate([rel1, rel2, [aperture], ee_euler])
+        return np.concatenate([rel1, a_rel1, rel2, a_rel2, [aperture]])
 
     def record_step(self, act):
         obs = self._get_relative_object_obs()
@@ -75,7 +83,7 @@ class Recording:
         for skill_id in self.skill_ids:
             # Convert the data buffer to bytes
             data_bytes = pickle.dumps(self.data_buffer[skill_id])
-            file_path = dir_path + skill_id + f' episode {ep_num}.zip'
+            file_path = dir_path + skill_id + f'episode_{ep_num}.zip'
             # Write the bytes to a zip file
             with zipfile.ZipFile(file_path, 'w') as zip_file:
                 with zip_file.open('data.pkl', 'w', force_zip64=True) as file:

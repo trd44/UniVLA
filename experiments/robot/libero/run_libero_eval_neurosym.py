@@ -135,21 +135,18 @@ class GymDiffusionWrapper(gym.Env):
         sim = self.env.sim
 
         # EE pose and orientation
-        #print("Get 1")
         gripper_body = sim.model.body_name2id('gripper0_eef')
         ee_pos = np.asarray(sim.data.body_xpos[gripper_body])
         ee_quat = np.asarray(sim.data.body_xquat[gripper_body])
         ee_euler = R.from_quat(ee_quat).as_euler("xyz")
 
         # Object positions
-        #print("Get 2")
-        target1_body = sim.model.body_name2id(self.target1)
-        target2_body = sim.model.body_name2id(self.target2)
-        #print("Get 3")
+        #self.target1 = sim.model.body_name2id(self.target1)
+        #self.target2 = sim.model.body_name2id(self.target2)
+        #print(self.target1, self.target2)
         obj1_pos = np.asarray(sim.data.get_body_xpos(self.target1))
         obj2_pos = np.asarray(sim.data.get_body_xpos(self.target2))
 
-        #print("Get 4")
         # Relative positions
         rel1 = obj1_pos - ee_pos
         rel2 = obj2_pos - ee_pos
@@ -158,7 +155,7 @@ class GymDiffusionWrapper(gym.Env):
         left_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint1_tip")])
         right_finger_pos = np.asarray(self.env.sim.data.body_xpos[self.env.sim.model.body_name2id("gripper0_finger_joint2_tip")])
         aperture = np.linalg.norm(left_finger_pos - right_finger_pos)
-        #print(ee_euler)
+
         return np.concatenate([rel1, rel2, [aperture], ee_euler])
 
     def step(self, action):
@@ -223,12 +220,13 @@ def eval_libero(cfg: GenerateConfig) -> None:
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
 
         # Get task
-        task_id = 1
+        task_id = 3
         task = task_suite.get_task(task_id)
 
         # Load executor
         pickplace = Executor_Diffusion(id='PickPlace', 
-                        policy=f"/home/hrilab/Documents/.vlas/vla-benchmarking/libero_diff_policies/18.04.13_train_diffusion_transformer_lowdim_on_stove/checkpoints/latest.ckpt",
+                        #policy=f"/home/hrilab/Documents/.vlas/vla-benchmarking/libero_diff_policies/08.47.01_train_diffusion_transformer_lowdim_open_drawer/checkpoints/latest.ckpt",
+                        policy=f"/home/hrilab/Documents/.vlas/vla-benchmarking/libero_diff_policies_save/18.04.23_train_diffusion_transformer_lowdim_open_drawer/checkpoints/latest.ckpt",
                         I={}, 
                         Beta=termination_indicator('pickplace'),
                         nulified_action_indexes=[],
@@ -239,13 +237,13 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
         # Define targets:
         target1 = "akita_black_bowl_1_main"
-        target2 = "flat_stove_1_burner_plate"
+        target2 = "wooden_cabinet_1_cabinet_top"
 
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
 
         n_obs_steps = 4
-        n_action_steps = 8
+        n_action_steps = 4
         max_steps = 20000
 
         def env_fn():

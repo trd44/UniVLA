@@ -194,20 +194,20 @@ class Executor_Diffusion(Executor):
         horizon = self.horizon if self.horizon is not None else 500
         print("\tTask goal: ", symgoal)
 
-        obs_base = False
+        #obs_base = False
 
-        if isinstance(obs, np.ndarray):
-            obs_base = np.any(obs == None)
-        else:
-            obs_base = obs == None
+        #if isinstance(obs, np.ndarray):
+        #    obs_base = np.any(obs == None)
+        #else:
+        #    obs_base = obs == None
 
         step_executor = 0
         done = False
         success = False 
         while not done:
             # Prepare the observation for the policy
-            if self.oracle:
-                obs = self.prepare_obs(obs, action_step=self.id)
+            #if self.oracle:
+            #    obs = self.prepare_obs(obs, action_step=self.id)
             #if obs_base:
             #    obs = self.obs_base_from_info(info)
             # create obs dict
@@ -241,14 +241,14 @@ class Executor_Diffusion(Executor):
             #         env.set_task((obj_to_pick, obj_to_drop))
             #         return (obj_to_pick, obj_to_drop), success
             # If the actions in action (array) do not have 4 elements, then concatenate [0] to the action array
-            if len(action[0][0]) < 4:
+            #if len(action[0][0]) < 4:
                 # Create a column of zeros
-                zeros_column = np.zeros((action.shape[0], action.shape[1], 1))
+                #zeros_column = np.zeros((action.shape[0], action.shape[1], 1))
                 # Concatenate the zeros column to the original array
                 #action = np.concatenate((action, zeros_column), axis=2)
                 # Concatenate zeros_colum to action at self.nulified_action_indexes
-                for index in self.nulified_action_indexes:
-                    action = np.insert(action, index, 0, axis=2)
+                #for index in self.nulified_action_indexes:
+                #    action = np.insert(action, index, 0, axis=2)
             #print("Action: ", action)
             # step env
             try: 

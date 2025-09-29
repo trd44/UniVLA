@@ -63,7 +63,7 @@ def save_rollout_video(rollout_images, idx, success, task_description, log_file=
     #processed_task_description = task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
     processed_task_description = str(task_description)
     mp4_path = f"{rollout_dir}/{DATE_TIME}--episode={idx}--success={success}--task={processed_task_description}.mp4"
-    video_writer = imageio.get_writer(mp4_path, fps=30)
+    video_writer = imageio.get_writer(mp4_path, fps=60)
     for img in rollout_images:
         video_writer.append_data(img)
     video_writer.close()
